@@ -1,0 +1,21 @@
+{
+  "name": "tvkit",
+  "version": "0.1.1",
+  "description": "Safe, reversible, measured tune-ups for Android TV / Google TV (built on a TCL) over ADB: connect, audit, debloat, speed up, redesign the home screen, drive it like a remote, and undo anything.",
+  "author": {
+    "name": "rafaykek",
+    "url": "https://github.com/rafaykek"
+  },
+  "homepage": "https://github.com/rafaykek/tvdetox",
+  "repository": "https://github.com/rafaykek/tvdetox",
+  "license": "MIT",
+  "keywords": [
+    "android-tv",
+    "google-tv",
+    "tcl",
+    "adb",
+    "debloat",
+    "launcher",
+    "smart-tv"
+  ]
+}

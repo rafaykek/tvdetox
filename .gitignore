@@ -1,0 +1,14 @@
+# Device state, screenshots and backups stay local (serials, IPs, installed apps)
+.tvkit/
+*.tvkit.json
+screens/
+
+# Python
+__pycache__/
+*.pyc
+
+# Local Claude Code settings
+.claude/settings.local.json
+
+# macOS
+.DS_Store

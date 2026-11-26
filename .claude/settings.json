@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(adb devices:*)",
+      "Bash(adb version:*)",
+      "Bash(adb shell getprop:*)",
+      "Bash(adb shell dumpsys:*)",
+      "Bash(adb shell pm list:*)",
+      "Bash(adb shell settings get:*)",
+      "Bash(adb shell settings list:*)",
+      "Bash(adb shell cmd package query-activities:*)",
+      "Bash(adb shell cmd package resolve-activity:*)",
+      "Bash(python3 -m unittest:*)"
+    ]
+  },
+  "enabledPlugins": {
+    "tvkit@tvkit": true
+  },
+  "extraKnownMarketplaces": {
+    "tvkit": {
+      "source": {
+        "source": "directory",
+        "path": "./"
+      }
+    }
+  }
+}

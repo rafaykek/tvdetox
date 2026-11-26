@@ -1,0 +1,15 @@
+{
+  "name": "tvkit",
+  "owner": {
+    "name": "rafaykek",
+    "url": "https://github.com/rafaykek"
+  },
+  "description": "tvdetox: Claude Code skills for safe, reversible, measured Android TV / Google TV tune-ups.",
+  "plugins": [
+    {
+      "name": "tvkit",
+      "source": "./",
+      "description": "Safe, reversible, measured tune-ups for Android TV / Google TV over ADB, with a guard hook that blocks destructive commands."
+    }
+  ]
+}

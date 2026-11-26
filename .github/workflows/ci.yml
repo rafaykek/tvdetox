@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.x"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: JSON manifests parse
+        run: git ls-files -z '*.json' | xargs -0 -n1 python -m json.tool > /dev/null
+
+      - name: Python compiles
+        run: git ls-files -z '*.py' 'bin/*' | xargs -0 -r -n1 python -m py_compile
+
+      - name: Unit tests (fake TV, no hardware)
+        if: hashFiles('tests/test_*.py') != ''
+        run: python -m unittest discover -s tests -v
