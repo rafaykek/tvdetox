@@ -1,0 +1,2074 @@
+#!/usr/bin/env python3
+"""tvkit - safe, reversible, measurable tune-ups for Android TV / Google TV over ADB.
+
+Built on a TCL Google TV; works on most Android TV / Google TV devices
+(TCL, Hisense, Sony, Philips, Xiaomi, Chromecast with Google TV, ...).
+
+Safety model (details in docs/SAFETY.md):
+  1. Read-only by default. Anything that changes the TV prints a plan and changes
+     nothing until it is re-run with --yes (or confirmed in an interactive terminal).
+  2. Before every change, a snapshot of all package states, settings and system
+     properties is saved under ~/.tvkit/.
+  3. Packages are checked against data/packages.json AND against live facts from
+     the TV: the current Home app, the active keyboard, accessibility services,
+     packages that run as a system user (uid < 10000) and persistent packages are
+     never disabled. Over Wi-Fi ADB a boot loop would also take ADB away, so tvkit
+     stays well clear of anything that could cause one.
+  4. Changes are applied one at a time, verified, and journaled with the exact
+     previous state, so `tvkit undo` restores what was there (not "enable everything").
+  5. Only reversible operations: pm disable-user (never uninstall), settings with the
+     old value recorded, Home-app choice with the old one recorded.
+
+Stdlib only, Python 3.8+.
+Exit codes: 0 ok, 1 error, 2 plan only (re-run with --yes), 3 refused by a safety rule.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as _dt
+import hashlib
+import json
+import os
+import re
+import shutil
+import socket
+import statistics
+import subprocess
+import sys
+import time
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+VERSION = "0.1.1"
+ROOT = Path(__file__).resolve().parent.parent
+KB_PATH = ROOT / "data" / "packages.json"
+STATE = Path(os.environ.get("TVKIT_HOME") or (Path.home() / ".tvkit")).expanduser()
+ADB_BIN = os.environ.get("TVKIT_ADB", "adb")
+SLEEP_SCALE = float(os.environ.get("TVKIT_SLEEP_SCALE", "1"))
+
+EXIT_OK, EXIT_ERR, EXIT_PLAN, EXIT_REFUSED = 0, 1, 2, 3
+
+PKG_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$")
+COMPONENT_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+/[A-Za-z0-9_.$]+$")
+TARGET_RE = re.compile(r"^[A-Za-z0-9.-]+(?::\d{1,5})?$")
+SETTING_KEY_RE = re.compile(r"^[A-Za-z0-9_.:-]+$")
+SETTING_VALUE_RE = re.compile(r"^[A-Za-z0-9_.,:/@%+=-]*$")
+SEP = "__TVKIT_SEP__"
+
+MAX_BATCH = 5
+HARD_MAX_BATCH = 10
+SAFE_FREE_GB = 2.0
+SAFE_FREE_RATIO = 0.15
+
+HOME_RESOLVE = "cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.HOME"
+HOME_QUERY = "cmd package query-activities --brief -a android.intent.action.MAIN -c android.intent.category.HOME"
+LAUNCHABLE_QUERY = ("cmd package query-activities --brief -a android.intent.action.MAIN "
+                    "-c android.intent.category.LEANBACK_LAUNCHER")
+ANIMATION_KEYS = ("window_animation_scale", "transition_animation_scale", "animator_duration_scale")
+DEFAULT_BENCH_APPS = ["com.google.android.youtube.tv", "com.netflix.ninja", "com.amazon.amazonvideo.livingroom",
+                      "com.plexapp.android", "com.disney.disneyplus", "com.spotify.tv.android"]
+
+# Settings tvkit refuses to write: they cut this connection, re-trigger setup, or weaken security.
+DANGEROUS_SETTINGS = {
+    "adb_enabled": "turns debugging off and cuts this connection (use `tvkit lock` to do that on purpose)",
+    "adb_wifi_enabled": "turns wireless debugging off and cuts this connection",
+    "development_settings_enabled": "hides Developer options and can switch debugging off",
+    "device_provisioned": "makes Android think setup never finished (the Home button stops working)",
+    "user_setup_complete": "re-triggers the setup wizard",
+    "wifi_on": "turns Wi-Fi off and cuts this connection",
+    "airplane_mode_on": "cuts all networking",
+    "package_verifier_enable": "weakens app-install security",
+    "verifier_verify_adb_installs": "weakens app-install security",
+    "install_non_market_apps": "weakens app-install security",
+    "http_proxy": "can break all networking",
+    "global_http_proxy_host": "can break all networking",
+    "global_http_proxy_port": "can break all networking",
+}
+
+KEYS = {
+    "HOME": "KEYCODE_HOME", "BACK": "KEYCODE_BACK", "UP": "KEYCODE_DPAD_UP", "DOWN": "KEYCODE_DPAD_DOWN",
+    "LEFT": "KEYCODE_DPAD_LEFT", "RIGHT": "KEYCODE_DPAD_RIGHT", "CENTER": "KEYCODE_DPAD_CENTER",
+    "OK": "KEYCODE_DPAD_CENTER", "ENTER": "KEYCODE_DPAD_CENTER", "MENU": "KEYCODE_MENU",
+    "SETTINGS": "KEYCODE_SETTINGS", "INPUT": "KEYCODE_TV_INPUT", "SEARCH": "KEYCODE_SEARCH",
+    "PLAY_PAUSE": "KEYCODE_MEDIA_PLAY_PAUSE", "PLAY": "KEYCODE_MEDIA_PLAY", "PAUSE": "KEYCODE_MEDIA_PAUSE",
+    "STOP": "KEYCODE_MEDIA_STOP", "NEXT": "KEYCODE_MEDIA_NEXT", "PREVIOUS": "KEYCODE_MEDIA_PREVIOUS",
+    "REWIND": "KEYCODE_MEDIA_REWIND", "FAST_FORWARD": "KEYCODE_MEDIA_FAST_FORWARD",
+    "VOLUME_UP": "KEYCODE_VOLUME_UP", "VOLUME_DOWN": "KEYCODE_VOLUME_DOWN", "MUTE": "KEYCODE_VOLUME_MUTE",
+    "CHANNEL_UP": "KEYCODE_CHANNEL_UP", "CHANNEL_DOWN": "KEYCODE_CHANNEL_DOWN", "GUIDE": "KEYCODE_GUIDE",
+    "INFO": "KEYCODE_INFO", "POWER": "KEYCODE_POWER", "SLEEP": "KEYCODE_SLEEP", "WAKE": "KEYCODE_WAKEUP",
+}
+
+ENABLED_STATES = {0: "default", 1: "enabled", 2: "disabled", 3: "disabled-user", 4: "disabled-until-used"}
+
+TEST_CHECKLIST = """Now test with the real remote before doing anything else:
+  1. Press Home: the home screen appears.
+  2. Press Inputs/Source and switch to an HDMI input and back.
+  3. Volume up/down and mute work.
+  4. The voice/microphone button works (if you use it).
+  5. Settings opens and Wi-Fi is still connected.
+  6. Open one streaming app and play something for a few seconds.
+If anything misbehaves: tvkit undo"""
+
+
+class TvkitError(Exception):
+    """A problem the user can fix. Printed without a traceback."""
+
+
+class Refused(Exception):
+    """A safety rule said no."""
+
+
+class PlanOnly(Exception):
+    """A plan was printed; nothing changed."""
+
+
+# ----------------------------------------------------------------------------- small helpers
+
+def sleep(seconds):
+    time.sleep(max(0.0, seconds * SLEEP_SCALE))
+
+
+def stamp():
+    return _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def iso_now():
+    return _dt.datetime.now().isoformat(timespec="seconds")
+
+
+def warn(msg):
+    print(f"! {msg}", file=sys.stderr)
+
+
+def emit_json(data):
+    print(json.dumps(data, indent=2, sort_keys=False, default=str))
+
+
+def print_table(rows, headers):
+    rows = [[("" if c is None else str(c)) for c in r] for r in rows]
+    widths = [len(h) for h in headers]
+    for r in rows:
+        for i, c in enumerate(r):
+            widths[i] = min(max(widths[i], len(c)), 60)
+    line = "  ".join(h.ljust(widths[i]) for i, h in enumerate(headers))
+    print(line.rstrip())
+    print("  ".join("-" * w for w in widths))
+    for r in rows:
+        print("  ".join((c if len(c) <= 60 else c[:57] + "...").ljust(widths[i]) for i, c in enumerate(r)).rstrip())
+
+
+def validate_pkg(pkg):
+    if not PKG_RE.match(pkg or ""):
+        raise TvkitError(f"not a valid package name: {pkg!r}")
+    return pkg
+
+
+def slug(text, fallback="item"):
+    return re.sub(r"[^A-Za-z0-9_-]+", "-", text or "").strip("-")[:40] or fallback
+
+
+def confirm(args, question="Apply these changes?"):
+    """Proceed only with --yes, or an explicit 'y' in an interactive terminal."""
+    if getattr(args, "yes", False):
+        return
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        answer = input(f"{question} [y/N] ").strip().lower()
+        if answer in ("y", "yes"):
+            return
+        raise PlanOnly("Cancelled. Nothing was changed.")
+    raise PlanOnly("Plan only: nothing was changed. Show this plan to the user; once they approve, "
+                   "re-run the same command with --yes.")
+
+
+# ----------------------------------------------------------------------------- adb plumbing
+
+def adb_exe():
+    if os.sep in ADB_BIN or (os.altsep and os.altsep in ADB_BIN):
+        if os.path.exists(ADB_BIN):
+            return ADB_BIN
+    else:
+        found = shutil.which(ADB_BIN)
+        if found:
+            return found
+    raise TvkitError(
+        "adb is not installed.\n"
+        "  macOS:   brew install --cask android-platform-tools\n"
+        "  Linux:   sudo apt install adb   (or your distro's android-tools package)\n"
+        "  Windows: https://developer.android.com/tools/releases/platform-tools")
+
+
+def run(args, timeout=30, binary=False):
+    try:
+        proc = subprocess.run(args, capture_output=True, timeout=timeout, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        raise TvkitError(f"timed out after {timeout}s: {' '.join(map(str, args))}")
+    except FileNotFoundError:
+        raise TvkitError(f"command not found: {args[0]}")
+    out = proc.stdout if binary else proc.stdout.decode("utf-8", "replace").replace("\r\n", "\n")
+    return proc.returncode, out, proc.stderr.decode("utf-8", "replace").strip()
+
+
+def run_for(cmd, seconds):
+    """Run a command that never exits on its own (e.g. dns-sd) for a while; return its output."""
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    except FileNotFoundError:
+        return ""
+    try:
+        out, _ = proc.communicate(timeout=seconds)
+    except subprocess.TimeoutExpired:
+        proc.terminate()
+        try:
+            out, _ = proc.communicate(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            out, _ = proc.communicate()
+    return out or ""
+
+
+def adb(*args, serial=None, timeout=30, binary=False):
+    cmd = [adb_exe()]
+    if serial:
+        cmd += ["-s", serial]
+    return run(cmd + [str(a) for a in args], timeout=timeout, binary=binary)
+
+
+def adb_devices():
+    _, out, _ = adb("devices")
+    devices = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and not line.startswith(("*", "List of")):
+            devices[parts[0]] = parts[1]
+    return devices
+
+
+class Device:
+    def __init__(self, serial):
+        self.serial = serial
+        self._props = None
+        self._dir = None
+
+    def sh(self, command, timeout=30):
+        code, out, err = adb("shell", command, serial=self.serial, timeout=timeout)
+        if code != 0 and not out.strip():
+            low = err.lower()
+            if low.startswith("error:") or any(s in low for s in ("device offline", "unauthorized", "no devices")):
+                raise TvkitError(f"lost the connection to the TV ({err}). Run `tvkit connect`.")
+        return out
+
+    def sh_many(self, commands, timeout=60):
+        """Run several read-only commands in one round trip; returns one output per command."""
+        out = self.sh(f"; echo {SEP}; ".join(commands), timeout=timeout)
+        parts = out.split(SEP)
+        parts = [parts[0]] + [p[1:] if p.startswith("\n") else p for p in parts[1:]]
+        parts += [""] * (len(commands) - len(parts))
+        return parts[:len(commands)]
+
+    @property
+    def props(self):
+        if self._props is None:
+            self._props = parse_getprop(self.sh("getprop"))
+        return self._props
+
+    @property
+    def dir(self):
+        if self._dir is None:
+            p = self.props
+            ident = p.get("ro.serialno") or p.get("ro.boot.serialno") or self.serial
+            model = p.get("ro.product.model") or "tv"
+            digest = hashlib.sha256(ident.encode()).hexdigest()[:6]
+            self._dir = STATE / "devices" / f"{slug(model.lower(), 'tv')}-{digest}"
+            self._dir.mkdir(parents=True, exist_ok=True)
+        return self._dir
+
+
+def parse_getprop(text):
+    return {m.group(1): m.group(2) for m in re.finditer(r"^\[([^\]]+)\]: \[(.*)\]\s*$", text, re.M)}
+
+
+def load_config():
+    path = STATE / "config.json"
+    if path.exists():
+        try:
+            return json.loads(path.read_text())
+        except json.JSONDecodeError:
+            warn(f"ignoring unreadable {path}")
+    return {}
+
+
+def save_config(cfg):
+    STATE.mkdir(parents=True, exist_ok=True)
+    (STATE / "config.json").write_text(json.dumps(cfg, indent=2) + "\n")
+
+
+def get_device(args):
+    serial = getattr(args, "device", None) or os.environ.get("TVKIT_DEVICE") or load_config().get("device")
+    devices = adb_devices()
+    if serial:
+        state = devices.get(serial)
+        if state != "device" and ":" in serial:
+            adb("connect", serial, timeout=10)  # Wi-Fi ADB drops when the TV sleeps; reconnect quietly.
+            sleep(1)
+            state = adb_devices().get(serial)
+        if state == "device":
+            return Device(serial)
+        if state == "unauthorized":
+            raise TvkitError("The TV hasn't approved this computer yet. On the TV choose Allow "
+                             "(tick 'Always allow from this computer'), then retry.")
+        raise TvkitError(f"Can't reach the TV at {serial} (state: {state or 'not connected'}). Is it on and on "
+                         "the same network? Try `tvkit connect` or `tvkit discover`.")
+    ready = [s for s, st in devices.items() if st == "device"]
+    if len(ready) == 1:
+        return Device(ready[0])
+    if not ready:
+        raise TvkitError("No TV connected. Run `tvkit discover`, then `tvkit connect <TV-IP>`.")
+    raise TvkitError(f"Several devices are connected ({', '.join(ready)}). Choose one with --device or "
+                     "`tvkit connect <ip>`.")
+
+
+# ----------------------------------------------------------------------------- knowledge base
+
+def load_kb():
+    kb = json.loads(KB_PATH.read_text())
+    local_path = STATE / "overrides.json"
+    if local_path.exists():
+        try:
+            local = json.loads(local_path.read_text())
+        except json.JSONDecodeError:
+            warn(f"ignoring unreadable {local_path}")
+            local = {}
+        for pkg, entry in local.items():
+            base = kb["packages"].get(pkg)
+            if base and base.get("tier") == "protected":
+                continue  # local notes can never unprotect a curated protected package
+            merged = dict(base or {})
+            merged.update(entry)
+            merged["local"] = True
+            kb["packages"][pkg] = merged
+    return kb
+
+
+def prefix_protected(pkg, kb):
+    for prefix in kb.get("protected_prefixes", []):
+        if pkg.startswith(prefix) or pkg == prefix.rstrip("."):
+            return prefix
+    return None
+
+
+def classify(pkg, kb, system=True):
+    """Return (tier, entry). Tiers: protected, caution, bloat, optional, unknown, user-app."""
+    entry = kb["packages"].get(pkg)
+    if entry and entry.get("tier") == "protected":
+        return "protected", entry
+    curated = entry is not None and not entry.get("local")
+    prefix = None if curated else prefix_protected(pkg, kb)
+    if prefix:
+        return "protected", {"why": f"core platform package (matches {prefix})"}
+    if entry:
+        return entry["tier"], entry
+    if not system:
+        return "user-app", {"why": "installed after setup, not part of the firmware"}
+    words = kb.get("protected_keywords", {})
+    segments = re.split(r"[._]", pkg.lower())[1:]
+    for word in words.get("substring", []):
+        if any(word in seg for seg in segments):
+            return "protected", {"why": f"unknown system package whose name suggests a core function ('{word}')"}
+    for word in words.get("segment", []):
+        if word in segments:
+            return "protected", {"why": f"unknown system package whose name suggests a core function ('{word}')"}
+    return "unknown", {"why": "system package not in tvkit's knowledge base; research it before touching it"}
+
+
+def label_for(pkg, kb):
+    entry = kb["packages"].get(pkg)
+    if entry and entry.get("label"):
+        return entry["label"]
+    skip = {"com", "org", "net", "tv", "android", "app", "apps", "atv", "androidtv", "leanback", "www", "livingroom"}
+    parts = [p for p in pkg.split(".") if p.lower() not in skip] or pkg.split(".")
+    return " ".join(p.replace("_", " ").title() for p in parts[-2:])
+
+
+def source_urls(entry, kb):
+    sources = kb.get("_meta", {}).get("sources", {})
+    return [sources.get(s, s) for s in entry.get("src", [])]
+
+
+# ----------------------------------------------------------------------------- live device facts
+
+def parse_component(text):
+    for line in reversed(text.strip().splitlines()):
+        line = line.strip()
+        if COMPONENT_RE.match(line):
+            return line
+    return None
+
+
+def parse_components(text):
+    comps = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if COMPONENT_RE.match(line):
+            comps.setdefault(line.split("/")[0], line)
+    return comps
+
+
+def parse_pkg_lines(text):
+    """`pm list packages [-U]` -> {package: uid or None}"""
+    pkgs = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("package:"):
+            body = line[len("package:"):].split()
+            if body:
+                uid = re.search(r"uid:(\d+)", line)
+                pkgs[body[0]] = int(uid.group(1)) if uid else None
+    return pkgs
+
+
+def parse_settings(text):
+    values = {}
+    for line in text.splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            values[k.strip()] = v.strip()
+    return values
+
+
+def package_facts(dev, pkg):
+    """Facts from `dumpsys package` for one package, or None if it is not on the TV."""
+    out = dev.sh(f"dumpsys package {pkg}")
+    marker = f"Package [{pkg}]"
+    idx = out.find(marker)
+    if idx < 0:
+        return None
+    # The block runs to the next package entry ("  Package [") or the next top-level section (a line at
+    # column 0, e.g. "Hidden system packages:", whose User 0 line describes the factory copy, not the live one).
+    # Updated system apps list hundreds of permission lines, so never cut the block by size.
+    rest = out[idx:]
+    end = re.search(r"\n(?:  Package \[|\S)", rest[len(marker):])
+    block = rest[:len(marker) + end.start()] if end else rest
+    uid = re.search(r"\buserId=(\d+)", block)
+    flags = re.search(r"\bpkgFlags=\[([^\]]*)\]", block)
+    flag_set = set((flags.group(1) if flags else "").split())
+    enabled = re.search(r"User 0:[^\n]*?\benabled=(\d)", block)
+    installed = re.search(r"User 0:[^\n]*?\binstalled=(true|false)", block)
+    return {
+        "package": pkg,
+        "uid": int(uid.group(1)) if uid else None,
+        "system": "SYSTEM" in flag_set,
+        "persistent": "PERSISTENT" in flag_set,
+        "enabled_state": int(enabled.group(1)) if enabled else 0,
+        "installed": (installed.group(1) == "true") if installed else True,
+    }
+
+
+def live_context(dev):
+    home_out, ime_out, acc_out = dev.sh_many([
+        HOME_RESOLVE,
+        "settings get secure default_input_method",
+        "settings get secure enabled_accessibility_services",
+    ])
+    home = parse_component(home_out)
+    ime = ime_out.strip()
+    return {
+        "home_component": home,
+        "home_package": home.split("/")[0] if home else None,
+        "ime_package": ime.split("/")[0] if "/" in ime else None,
+        "accessibility_packages": {x.split("/")[0] for x in acc_out.strip().split(":") if "/" in x},
+    }
+
+
+def live_block_reason(pkg, facts, ctx):
+    """Rules that come from the TV itself. Nothing overrides these."""
+    if pkg == ctx.get("home_package"):
+        return ("it is the TV's current Home app. Install a replacement, make it Home, check the Home button "
+                "on the real remote, and only then reconsider")
+    if pkg == ctx.get("ime_package"):
+        return "it is the active on-screen keyboard"
+    if pkg in ctx.get("accessibility_packages", set()):
+        return "it is an active accessibility service (someone may rely on it)"
+    if facts.get("uid") is not None and facts["uid"] < 10000:
+        return (f"it runs as a core system user (uid {facts['uid']}). Over Wi-Fi ADB a boot loop would also "
+                "take ADB away, so tvkit never touches these")
+    if facts.get("persistent"):
+        return "Android keeps it permanently running (persistent), so it is a core component"
+    return None
+
+
+def gather_info(dev):
+    p = dev.props
+    (wm, meminfo, df, uptime, home, ime, launcherx, features, *scales) = dev.sh_many([
+        "wm size", "cat /proc/meminfo", "df /data", "cat /proc/uptime", HOME_RESOLVE,
+        "settings get secure default_input_method", "pm list packages com.google.android.apps.tv.launcherx",
+        "pm list features",
+    ] + [f"settings get global {k}" for k in ANIMATION_KEYS])
+    size = re.search(r"Override size:\s*(\d+x\d+)", wm) or re.search(r"Physical size:\s*(\d+x\d+)", wm)
+    mem = {k: int(v) for k, v in re.findall(r"^(\w+):\s+(\d+)\s*kB", meminfo, re.M)}
+    disk = re.search(r"(\d+)\s+(\d+)\s+(\d+)\s+\d+%\s+\S*/data\b", df)
+    up = re.match(r"\s*([\d.]+)", uptime)
+    home_comp = parse_component(home)
+    ime = ime.strip()
+    return {
+        "serial": dev.serial,
+        "model": p.get("ro.product.model"),
+        "brand": p.get("ro.product.brand"),
+        "manufacturer": p.get("ro.product.manufacturer"),
+        "android_release": p.get("ro.build.version.release"),
+        "sdk": int(p["ro.build.version.sdk"]) if p.get("ro.build.version.sdk", "").isdigit() else None,
+        "build_fingerprint": p.get("ro.build.fingerprint"),
+        "security_patch": p.get("ro.build.version.security_patch"),
+        "resolution": size.group(1) if size else None,
+        "ram_total_mb": round(mem["MemTotal"] / 1024) if "MemTotal" in mem else None,
+        "ram_available_mb": round(mem["MemAvailable"] / 1024) if "MemAvailable" in mem else None,
+        "storage_total_gb": round(int(disk.group(1)) / 1048576, 2) if disk else None,
+        "storage_free_gb": round(int(disk.group(3)) / 1048576, 2) if disk else None,
+        "uptime_hours": round(float(up.group(1)) / 3600, 1) if up else None,
+        "home_package": home_comp.split("/")[0] if home_comp else None,
+        "home_activity": home_comp,
+        "keyboard": ime.split("/")[0] if "/" in ime else None,
+        "google_tv": "package:com.google.android.apps.tv.launcherx" in launcherx,
+        "android_tv": "android.software.leanback" in features,
+        "animation_scales": {k: (v.strip() if v.strip() not in ("", "null") else None)
+                             for k, v in zip(ANIMATION_KEYS, scales)},
+        "device_dir": str(dev.dir),
+    }
+
+
+def health_findings(i):
+    findings = []
+    free, total = i.get("storage_free_gb"), i.get("storage_total_gb")
+    if free is not None and total:
+        if free < SAFE_FREE_GB or free / total < SAFE_FREE_RATIO:
+            findings.append(("high", f"Low storage: {free:.1f} GB free of {total:.1f} GB. Android TVs slow down badly "
+                                     "when storage is nearly full. Fix: `tvkit cache`, and uninstall apps you don't use."))
+    up = i.get("uptime_hours")
+    if up and up > 24 * 7:
+        findings.append(("medium", f"Up {up / 24:.0f} days without a reboot (TCL 'instant power on' rarely truly "
+                                   "reboots). A restart clears memory pressure: `tvkit reboot`."))
+    ram = i.get("ram_available_mb")
+    if ram is not None and ram < 400:
+        findings.append(("medium", f"Only {ram} MB RAM available. On low-RAM TVs, fewer background apps "
+                                   "(see the debloat skill) is the lever that matters most."))
+    scales = i.get("animation_scales") or {}
+    if all(v in (None, "1", "1.0") for v in scales.values()):
+        findings.append(("low", "Animations run at 1x. 0.5x makes menus feel snappier (cosmetic, reversible): "
+                                "`tvkit animations 0.5`."))
+    patch = i.get("security_patch")
+    if patch:
+        try:
+            age = (_dt.date.today() - _dt.date.fromisoformat(patch)).days
+            if age > 365:
+                findings.append(("info", f"Security patch is {age // 30} months old ({patch}). Keep firmware updates "
+                                         "on; tvkit never disables the update service."))
+        except ValueError:
+            pass
+    return findings
+
+
+# ----------------------------------------------------------------------------- snapshots & journal
+
+SNAPSHOT_COMMANDS = {
+    "packages.txt": "pm list packages -U --user 0",
+    "system.txt": "pm list packages -s --user 0",
+    "disabled.txt": "pm list packages -d --user 0",
+    "all-including-uninstalled.txt": "pm list packages -u --user 0",
+    "settings-global.txt": "settings list global",
+    "settings-secure.txt": "settings list secure",
+    "settings-system.txt": "settings list system",
+    "home.txt": HOME_RESOLVE,
+}
+
+
+def take_snapshot(dev, label):
+    base = dev.dir / "snapshots"
+    base.mkdir(parents=True, exist_ok=True)
+    name = f"{stamp()}-{slug(label, 'snapshot')}"
+    d, n = base / name, 1
+    while d.exists():
+        n += 1
+        d = base / f"{name}-{n}"
+    d.mkdir()
+    names = list(SNAPSHOT_COMMANDS)
+    outputs = dev.sh_many([SNAPSHOT_COMMANDS[k] for k in names], timeout=120)
+    for fname, text in zip(names, outputs):
+        (d / fname).write_text(text)
+    (d / "getprop.txt").write_text(dev.sh("getprop"))
+    meta = {
+        "label": label, "created": iso_now(), "serial": dev.serial,
+        "model": dev.props.get("ro.product.model"), "fingerprint": dev.props.get("ro.build.fingerprint"),
+        "packages": len(parse_pkg_lines(outputs[0])), "disabled": len(parse_pkg_lines(outputs[2])),
+        "home": parse_component(outputs[7]),
+    }
+    (d / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")
+    return d
+
+
+def list_snapshots(dev):
+    base = dev.dir / "snapshots"
+    if not base.exists():
+        return []
+    return sorted((p for p in base.iterdir() if (p / "meta.json").exists()), key=lambda p: p.name)
+
+
+def find_snapshot(dev, name):
+    snaps = list_snapshots(dev)
+    if not snaps:
+        raise TvkitError("No snapshots yet. Take one with `tvkit snapshot`.")
+    if name in (None, "", "latest"):
+        return snaps[-1]
+    for test in (lambda p: p.name == name, lambda p: p.name.endswith("-" + name), lambda p: p.name.startswith(name)):
+        hits = [p for p in snaps if test(p)]
+        if hits:
+            return hits[-1]
+    raise TvkitError(f"No snapshot matches {name!r}. See `tvkit snapshots`.")
+
+
+def read_state_from_snapshot(d):
+    def read(f):
+        p = d / f
+        return p.read_text() if p.exists() else ""
+    return {
+        "installed": set(parse_pkg_lines(read("packages.txt"))),
+        "disabled": set(parse_pkg_lines(read("disabled.txt"))),
+        "known": set(parse_pkg_lines(read("all-including-uninstalled.txt"))),
+        "settings": {ns: parse_settings(read(f"settings-{ns}.txt")) for ns in ("global", "secure", "system")},
+        "home": parse_component(read("home.txt")),
+    }
+
+
+def read_live_state(dev):
+    outs = dev.sh_many([SNAPSHOT_COMMANDS[k] for k in
+                        ("packages.txt", "disabled.txt", "all-including-uninstalled.txt",
+                         "settings-global.txt", "settings-secure.txt", "settings-system.txt", "home.txt")],
+                       timeout=120)
+    return {
+        "installed": set(parse_pkg_lines(outs[0])),
+        "disabled": set(parse_pkg_lines(outs[1])),
+        "known": set(parse_pkg_lines(outs[2])),
+        "settings": {"global": parse_settings(outs[3]), "secure": parse_settings(outs[4]),
+                     "system": parse_settings(outs[5])},
+        "home": parse_component(outs[6]),
+    }
+
+
+def journal_path(dev):
+    return dev.dir / "journal.jsonl"
+
+
+def journal_read(dev):
+    path = journal_path(dev)
+    if not path.exists():
+        return []
+    entries = []
+    for line in path.read_text().splitlines():
+        if line.strip():
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                warn(f"skipping a corrupt journal line in {path}")
+    return entries
+
+
+class Batch:
+    """One user-approved group of changes; `tvkit undo` reverts a whole batch."""
+
+    def __init__(self, dev, reason):
+        self.dev = dev
+        self.id = _dt.datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:-3]
+        self.reason = reason
+        self.n = 0
+
+    def log(self, entry):
+        self.n += 1
+        entry = dict(entry, id=f"{self.id}-{self.n}", batch=self.id, ts=iso_now(), reason=self.reason)
+        with open(journal_path(self.dev), "a") as f:
+            f.write(json.dumps(entry) + "\n")
+        return entry
+
+
+def active_changes(entries):
+    reverted = {e.get("of") for e in entries if e.get("kind") == "revert"}
+    return [e for e in entries if e.get("kind") in ("package", "setting", "home") and e.get("id") not in reverted]
+
+
+# ----------------------------------------------------------------------------- primitive changes
+
+def set_pkg_state(dev, pkg, state):
+    if state in (0, None):
+        out = dev.sh(f"pm default-state --user 0 {pkg}")
+        if "new state" not in out:
+            out = dev.sh(f"pm enable --user 0 {pkg}")
+    elif state == 1:
+        out = dev.sh(f"pm enable --user 0 {pkg}")
+    elif state == 4:
+        out = dev.sh(f"pm disable-until-used --user 0 {pkg}")
+    else:  # 2 = disabled by the system/OEM; disable-user is the closest a non-root shell can get
+        out = dev.sh(f"pm disable-user --user 0 {pkg}")
+    return out.strip()
+
+
+def read_setting(dev, ns, key):
+    value = dev.sh(f"settings get {ns} {key}").strip()
+    return None if value in ("", "null") else value
+
+
+def write_setting(dev, ns, key, value):
+    if value is None:
+        dev.sh(f"settings delete {ns} {key}")
+    else:
+        dev.sh(f"settings put {ns} {key} {value}")
+    return read_setting(dev, ns, key)
+
+
+def check_setting(ns, key, value):
+    if ns not in ("global", "secure", "system"):
+        raise TvkitError("namespace must be global, secure or system")
+    if not SETTING_KEY_RE.match(key):
+        raise TvkitError(f"invalid setting key {key!r}")
+    if value is not None and not SETTING_VALUE_RE.match(value):
+        raise TvkitError(f"invalid value {value!r} (letters, digits and . , _ : / @ % + = - only)")
+    if key in DANGEROUS_SETTINGS:
+        raise Refused(f"tvkit won't change {ns}/{key}: it {DANGEROUS_SETTINGS[key]}.")
+
+
+def revert_entry(dev, entry):
+    kind = entry["kind"]
+    if kind == "package":
+        set_pkg_state(dev, entry["target"], entry.get("before"))
+        facts = package_facts(dev, entry["target"]) or {}
+        ok = facts.get("enabled_state") == (entry.get("before") or 0) or (
+            entry.get("before") in (0, 1, None) and facts.get("enabled_state") in (0, 1))
+        return ok, ENABLED_STATES.get(facts.get("enabled_state"), "?")
+    if kind == "setting":
+        after = write_setting(dev, entry["ns"], entry["key"], entry.get("before"))
+        return after == entry.get("before"), after
+    if kind == "home":
+        before = entry.get("before")
+        if before:
+            dev.sh(f"cmd package set-home-activity --user 0 {before}")
+        now = live_context(dev)["home_component"]
+        return now == before, now
+    return False, "unknown change type"
+
+
+# ----------------------------------------------------------------------------- commands: setup
+
+def cmd_doctor(args):
+    ok = True
+
+    def check(passed, label, hint=""):
+        nonlocal ok
+        ok = ok and passed
+        print(f"{'✓' if passed else '✗'} {label}")
+        if hint and not passed:
+            print(f"    {hint}")
+
+    check(sys.version_info >= (3, 8), f"Python {sys.version.split()[0]}", "tvkit needs Python 3.8+")
+    try:
+        exe = adb_exe()
+        _, out, _ = run([exe, "version"])
+        check(True, f"adb: {out.splitlines()[0] if out else exe}")
+    except TvkitError as e:
+        check(False, "adb installed", str(e))
+        return EXIT_ERR
+    try:
+        STATE.mkdir(parents=True, exist_ok=True)
+        check(os.access(STATE, os.W_OK), f"state folder {STATE}")
+    except OSError as e:
+        check(False, f"state folder {STATE}", str(e))
+    cfg = load_config()
+    saved = cfg.get("device")
+    devices = adb_devices()
+    if devices:
+        print("  adb sees: " + ", ".join(f"{s} ({st})" for s, st in devices.items()))
+    if not saved:
+        print("· No TV saved yet. Next: `tvkit discover`, then `tvkit connect <TV-IP>`.")
+        return EXIT_OK if ok else EXIT_ERR
+    host, _, port = saved.partition(":")
+    try:
+        socket.create_connection((host, int(port or 5555)), timeout=3).close()
+        check(True, f"TV {saved} reachable on the network")
+    except ConnectionRefusedError:
+        check(False, f"TV {saved} reachable", "The TV answered but refused ADB: debugging is off, or wireless "
+              "debugging moved to a new port (it changes every time). Check Developer options on the TV.")
+    except socket.timeout:
+        check(False, f"TV {saved} reachable", "No answer: the TV is asleep/off, or its IP changed (`tvkit discover`).")
+    except OSError as e:
+        hint = "Wrong IP or a different network."
+        if sys.platform == "darwin":
+            hint += (" On macOS also check System Settings > Privacy & Security > Local Network and allow your "
+                     "terminal / VS Code.")
+        check(False, f"TV {saved} reachable ({e.strerror or e})", hint)
+    state = devices.get(saved)
+    check(state == "device", f"ADB session with {saved}: {state or 'not connected'}",
+          "Run `tvkit connect` and approve the prompt on the TV." if state != "unauthorized" else
+          "Approve 'Allow debugging?' on the TV (tick 'Always allow').")
+    return EXIT_OK if ok else EXIT_ERR
+
+
+def _parse_txt(text):
+    txt = {}
+    for key, raw in re.findall(r"(\w+)=((?:\\.|[^\s\\])*)", text.splitlines()[0] if text.strip() else ""):
+        raw = re.sub(r"\\(\d{3})", lambda m: chr(int(m.group(1))), raw)
+        txt[key] = re.sub(r"\\(.)", r"\1", raw)
+    return txt
+
+
+def _discover_macos(seconds):
+    services = ["_googlecast._tcp", "_androidtvremote2._tcp", "_adb-tls-connect._tcp"]
+    procs = {}
+    for svc in services:
+        try:
+            procs[svc] = subprocess.Popen(["dns-sd", "-B", svc, "local."], stdout=subprocess.PIPE,
+                                          stderr=subprocess.DEVNULL, text=True)
+        except FileNotFoundError:
+            return []
+    time.sleep(seconds)
+    found = {}
+    for svc, proc in procs.items():
+        proc.terminate()
+        try:
+            out, _ = proc.communicate(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            out, _ = proc.communicate()
+        for line in (out or "").splitlines():
+            m = re.match(r"^\s*[\d:.]+\s+Add\s+\d+\s+\d+\s+\S+\s+\S+\s+(.+?)\s*$", line)
+            if not m:
+                continue
+            instance = m.group(1)
+            res = run_for(["dns-sd", "-L", instance, svc, "local."], 3)
+            hm = re.search(r"can be reached at\s+(\S+?)\.?:(\d+)", res)
+            if not hm:
+                continue
+            host, port = hm.group(1), int(hm.group(2))
+            txt = _parse_txt(res[hm.end():].split("\n", 1)[-1])
+            ip = None
+            for gl in run_for(["dns-sd", "-G", "v4", host], 3).splitlines():
+                ipm = re.search(r"\sAdd\s.*?\s(\d{1,3}(?:\.\d{1,3}){3})\b", gl)
+                if ipm:
+                    ip = ipm.group(1)
+                    break
+            entry = found.setdefault(ip or host, {"ip": ip, "host": host, "name": None, "model": None,
+                                                  "services": []})
+            entry["services"].append(f"{svc.split('.')[0].lstrip('_')}:{port}")
+            entry["name"] = entry["name"] or txt.get("fn") or instance
+            entry["model"] = entry["model"] or txt.get("md")
+            if svc.startswith("_adb-tls-connect"):
+                entry["adb_port"] = port
+    return list(found.values())
+
+
+def _discover_avahi(seconds):
+    found = {}
+    for svc in ("_googlecast._tcp", "_androidtvremote2._tcp", "_adb-tls-connect._tcp"):
+        out = run_for(["avahi-browse", "-rtp", svc], seconds)
+        for line in out.splitlines():
+            f = line.split(";")
+            if len(f) >= 9 and f[0] == "=" and f[2] == "IPv4":
+                txt = dict(re.findall(r'"(\w+)=([^"]*)"', ";".join(f[9:])))
+                entry = found.setdefault(f[7], {"ip": f[7], "host": f[6], "name": None, "model": None, "services": []})
+                entry["services"].append(f"{svc.lstrip('_').split('.')[0]}:{f[8]}")
+                entry["name"] = entry["name"] or txt.get("fn") or f[3].replace("\\032", " ")
+                entry["model"] = entry["model"] or txt.get("md")
+                if svc.startswith("_adb-tls-connect"):
+                    entry["adb_port"] = int(f[8])
+    return list(found.values())
+
+
+SCAN_PORTS = {5555: "adb", 6466: "android-tv-remote", 8009: "cast"}
+
+
+def local_prefixes():
+    """The /24 prefix of this computer's LAN address (best effort; no packet is sent)."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("192.0.2.1", 9))  # TEST-NET address: only picks the outgoing interface
+            ip = s.getsockname()[0]
+    except OSError:
+        return []
+    return [] if ip.startswith(("127.", "0.")) else [ip.rsplit(".", 1)[0]]
+
+
+def tcp_scan(hosts, ports, timeout=0.5, workers=96):
+    """Plain TCP connect probes, {host: {open ports}}. No ADB handshake, so no prompt appears on any device."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def probe(target):
+        try:
+            socket.create_connection(target, timeout=timeout).close()
+            return target
+        except OSError:
+            return None
+
+    found = {}
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for hit in pool.map(probe, [(h, p) for h in hosts for p in ports]):
+            if hit:
+                found.setdefault(hit[0], set()).add(hit[1])
+    return found
+
+
+def scan_network():
+    """Find Android/Google TVs by their open ports on this computer's /24 network."""
+    entries = []
+    for prefix in local_prefixes():
+        hits = tcp_scan([f"{prefix}.{n}" for n in range(1, 255)], list(SCAN_PORTS))
+        for ip, ports in sorted(hits.items(), key=lambda kv: int(kv[0].rsplit(".", 1)[1])):
+            entries.append({"ip": ip, "host": None, "name": None, "model": None,
+                            "services": [f"{SCAN_PORTS[p]}:{p}" for p in sorted(ports)],
+                            "adb_port": 5555 if 5555 in ports else None})
+    return entries
+
+
+def discover_status(entry):
+    services = " ".join(entry.get("services", []))
+    if entry.get("adb_port"):
+        return "ADB ready"
+    if "android-tv-remote" in services or "androidtvremote" in services:
+        return "Android/Google TV, debugging off"
+    if "cast" in services or "googlecast" in services:
+        return "Cast device (TV, speaker or dongle)"
+    return "?"
+
+
+def discover(seconds, scan=False):
+    if sys.platform == "darwin" and shutil.which("dns-sd"):
+        found = _discover_macos(seconds)
+    elif shutil.which("avahi-browse"):
+        found = _discover_avahi(seconds)
+    else:
+        found = []
+    if scan:
+        for entry in scan_network():
+            known = next((e for e in found if e.get("ip") == entry["ip"]), None)
+            if known:
+                known["services"] += [s for s in entry["services"] if s not in known["services"]]
+                known["adb_port"] = known.get("adb_port") or entry["adb_port"]
+            else:
+                found.append(entry)
+    try:  # adb's own mDNS sees TVs that advertise Android 11+ wireless debugging
+        _, out, _ = adb("mdns", "services", timeout=10)
+        for m in re.finditer(r"_adb-tls-connect\._tcp\.?\s+(\d{1,3}(?:\.\d{1,3}){3}):(\d+)", out):
+            entry = next((e for e in found if e.get("ip") == m.group(1)), None)
+            if entry is None:
+                entry = {"ip": m.group(1), "host": None, "name": None, "model": None, "services": []}
+                found.append(entry)
+            entry["adb_port"] = int(m.group(2))
+            entry["services"].append(f"adb-tls-connect:{m.group(2)}")
+    except TvkitError:
+        pass
+    return found
+
+
+def cmd_discover(args):
+    found = discover(args.timeout, scan=args.scan)
+    for e in found:
+        e["status"] = discover_status(e)
+    if args.json:
+        emit_json(found)
+        return EXIT_OK
+    if not found:
+        print("No Android TV / Google TV found on this network.\n"
+              "  - Make sure the TV is on (not in standby) and on the same Wi-Fi as this computer.\n"
+              + ("" if args.scan else "  - Some TVs don't announce themselves: try `tvkit discover --scan`.\n")
+              + "  - Or read the IP on the TV: Settings > Network & Internet > (your network) > IP address.\n"
+              "  - Then: tvkit connect <TV-IP>")
+        if sys.platform not in ("darwin",) and not shutil.which("avahi-browse"):
+            print("  (Install avahi-utils for network discovery on Linux.)")
+        return EXIT_ERR
+    print_table([[e.get("name"), e.get("model"), e.get("ip") or e.get("host"), e["status"], ", ".join(e["services"])]
+                 for e in found], ["Name", "Model", "IP", "Status", "Services"])
+    print()
+    for e in found:
+        if not e.get("ip"):
+            continue
+        port = e.get("adb_port")
+        if port:
+            print(f"tvkit connect {e['ip']}{'' if port == 5555 else ':' + str(port)}")
+        elif e["status"].startswith("Android"):
+            print(f"{e['ip']}: turn on USB debugging on this TV (Developer options), then: tvkit connect {e['ip']}")
+    return EXIT_OK
+
+
+def cmd_pair(args):
+    if not TARGET_RE.match(args.target) or ":" not in args.target:
+        raise TvkitError("use the IP:PORT shown under 'Pair device with pairing code' on the TV")
+    if not re.fullmatch(r"\d{6}", args.code):
+        raise TvkitError("the pairing code is the 6-digit number shown on the TV")
+    _, out, err = adb("pair", args.target, args.code, timeout=30)
+    text = (out + "\n" + err).strip()
+    if "Successfully paired" not in text:
+        raise TvkitError(f"pairing failed: {text}\nThe code expires when the dialog closes; open it again for a new one.")
+    ip = args.target.split(":")[0]
+    print(f"Paired. Now connect to the port shown under 'IP address & Port' on the Wireless debugging screen "
+          f"(not the pairing port):\n  tvkit connect {ip}:<port>")
+    return EXIT_OK
+
+
+def cmd_connect(args):
+    target = args.target or load_config().get("device")
+    if not target:
+        found = [e for e in discover(4, scan=True) if e.get("ip") and e.get("adb_port")]
+        if len(found) != 1:
+            raise TvkitError("Tell me the TV's IP: `tvkit connect <TV-IP>` (see `tvkit discover`, or TV Settings > "
+                             "Network & Internet > your network).")
+        target = found[0]["ip"] + (f":{found[0]['adb_port']}" if found[0].get("adb_port") else "")
+    if not TARGET_RE.match(target):
+        raise TvkitError(f"not an IP/host: {target!r}")
+    if ":" not in target:
+        target += ":5555"
+    _, out, err = adb("connect", target, timeout=20)
+    text = (out + " " + err).strip()
+    low = text.lower()
+    if "refused" in low:
+        raise TvkitError(f"{text}\nThe TV refused ADB. On the TV: Settings > System > Developer options > turn on "
+                         "USB debugging. If you see 'Wireless debugging', turn it on and use the IP:port it shows "
+                         "(pair first with `tvkit pair`).")
+    if "no route" in low or "unreachable" in low:
+        hint = "Wrong IP, or the TV is on a different network."
+        if sys.platform == "darwin":
+            hint += " On macOS also allow your terminal / VS Code under System Settings > Privacy & Security > Local Network."
+        raise TvkitError(f"{text}\n{hint}")
+    if "timed out" in low or "timeout" in low:
+        raise TvkitError(f"{text}\nThe TV didn't answer: is it on (not in standby) and is the IP right?")
+    if "cannot" in low or ("failed" in low and "authenticate" not in low):
+        raise TvkitError(text)
+    state = adb_devices().get(target)
+    if state != "device":
+        print("Look at the TV: approve 'Allow debugging?' and tick 'Always allow from this computer'.", flush=True)
+        deadline = time.time() + args.wait
+        while time.time() < deadline:
+            sleep(2)
+            state = adb_devices().get(target)
+            if state == "device":
+                break
+            if state is None:
+                adb("connect", target, timeout=10)
+    if state != "device":
+        raise TvkitError(f"Not authorized yet (state: {state or 'gone'}). Accept the prompt on the TV and run "
+                         "`tvkit connect` again. No prompt? Toggle USB debugging off and on, then run "
+                         "`adb kill-server` and retry.")
+    cfg = load_config()
+    cfg["device"] = target
+    save_config(cfg)
+    dev = Device(target)
+    i = gather_info(dev)
+    kind = "Google TV" if i["google_tv"] else ("Android TV" if i["android_tv"] else "Android device (not a TV?)")
+    print(f"Connected: {i['brand']} {i['model']} · Android {i['android_release']} · {kind} · {target}")
+    if not list_snapshots(dev):
+        d = take_snapshot(dev, "baseline")
+        print(f"Saved a read-only baseline snapshot of the factory state: {d}")
+    print("Security: anyone on your network who gets past the TV's prompt could control it. Turn debugging off "
+          "when you're done (`tvkit lock`).")
+    return EXIT_OK
+
+
+def cmd_disconnect(args):
+    target = args.target or load_config().get("device")
+    if target:
+        adb("disconnect", target)
+        print(f"Disconnected {target} (still saved; `tvkit connect` reconnects).")
+    return EXIT_OK
+
+
+def cmd_lock(args):
+    dev = get_device(args)
+    print(f"Plan: turn off debugging on {dev.serial}. This ends tvkit's access; to come back, re-enable it in "
+          "Developer options on the TV.")
+    confirm(args, "Turn off debugging now?")
+    try:
+        dev.sh("settings put global adb_enabled 0", timeout=10)
+    except TvkitError:
+        pass
+    print("Debugging turned off on the TV.")
+    return EXIT_OK
+
+
+# ----------------------------------------------------------------------------- commands: read-only
+
+def cmd_status(args):
+    dev = get_device(args)
+    p = dev.props
+    google_tv = "launcherx" in dev.sh("pm list packages com.google.android.apps.tv.launcherx")
+    data = {"serial": dev.serial, "brand": p.get("ro.product.brand"), "model": p.get("ro.product.model"),
+            "android_release": p.get("ro.build.version.release"), "google_tv": google_tv,
+            "device_dir": str(dev.dir), "snapshots": len(list_snapshots(dev)),
+            "active_changes": len(active_changes(journal_read(dev)))}
+    if args.json:
+        emit_json(data)
+    else:
+        print(f"Connected: {data['brand']} {data['model']} · Android {data['android_release']} · "
+              f"{'Google TV' if google_tv else 'Android TV'} · {dev.serial}")
+        print(f"State: {dev.dir} ({data['snapshots']} snapshots, {data['active_changes']} active changes)")
+    return EXIT_OK
+
+
+def cmd_info(args):
+    dev = get_device(args)
+    i = gather_info(dev)
+    if args.json:
+        emit_json(i)
+        return EXIT_OK
+    kind = "Google TV" if i["google_tv"] else "Android TV"
+    print(f"{i['brand']} {i['model']} · Android {i['android_release']} (SDK {i['sdk']}) · {kind}")
+    print(f"Security patch {i['security_patch']} · UI {i['resolution']} · up {i['uptime_hours']} h")
+    print(f"RAM {i['ram_available_mb']} MB available of {i['ram_total_mb']} MB · "
+          f"storage {i['storage_free_gb']} GB free of {i['storage_total_gb']} GB")
+    print(f"Home: {i['home_activity']} · keyboard: {i['keyboard']}")
+    print("Animations: " + ", ".join(f"{k.split('_')[0]}={v or '1 (default)'}"
+                                     for k, v in i["animation_scales"].items()))
+    for level, text in health_findings(i):
+        print(f"[{level}] {text}")
+    return EXIT_OK
+
+
+def cmd_audit(args):
+    dev = get_device(args)
+    kb = load_kb()
+    i = gather_info(dev)
+    ctx = live_context(dev)
+    installed_out, system_out, disabled_out, launch_out = dev.sh_many([
+        "pm list packages -U --user 0", "pm list packages -s --user 0", "pm list packages -d --user 0",
+        LAUNCHABLE_QUERY])
+    installed = parse_pkg_lines(installed_out)
+    system = set(parse_pkg_lines(system_out))
+    disabled = set(parse_pkg_lines(disabled_out))
+    launchable = parse_components(launch_out)
+    rows = []
+    for pkg in sorted(installed):
+        uid = installed[pkg]
+        tier, entry = classify(pkg, kb, system=pkg in system)
+        live = None
+        if pkg == ctx["home_package"]:
+            live = "current Home app"
+        elif pkg == ctx["ime_package"]:
+            live = "active keyboard"
+        elif pkg in ctx["accessibility_packages"]:
+            live = "active accessibility service"
+        elif uid is not None and uid < 10000:
+            live = f"system user (uid {uid})"
+        rows.append({
+            "package": pkg, "label": label_for(pkg, kb), "tier": tier, "live_protection": live,
+            "enabled": pkg not in disabled, "system": pkg in system, "launchable": pkg in launchable,
+            "uid": uid, "why": entry.get("why"), "breaks": entry.get("breaks"),
+            "sources": source_urls(entry, kb),
+        })
+    enabled = [r for r in rows if r["enabled"]]
+    counts = {}
+    for r in enabled:
+        counts[r["tier"]] = counts.get(r["tier"], 0) + 1
+    candidates = [r for r in enabled if r["tier"] == "bloat" and not r["live_protection"]]
+    caution = [r for r in enabled if r["tier"] == "caution" and not r["live_protection"]]
+    optional = [r for r in enabled if r["tier"] == "optional" and not r["live_protection"]]
+    unknown = [r for r in enabled if r["tier"] == "unknown" and not r["live_protection"]]
+    findings = health_findings(i)
+    report = {"info": i, "findings": [{"level": l, "text": t} for l, t in findings], "counts_enabled": counts,
+              "bloat_candidates": candidates, "caution": caution, "optional": optional, "unknown": unknown,
+              "already_disabled": [r for r in rows if not r["enabled"]], "packages": rows}
+    if args.json:
+        emit_json(report)
+        return EXIT_OK
+    kind = "Google TV" if i["google_tv"] else "Android TV"
+    print(f"{i['brand']} {i['model']} · Android {i['android_release']} · {kind} · patch {i['security_patch']}")
+    print(f"RAM {i['ram_available_mb']}/{i['ram_total_mb']} MB available · storage {i['storage_free_gb']}/"
+          f"{i['storage_total_gb']} GB free · up {i['uptime_hours']} h · Home {i['home_package']}\n")
+    for level, text in findings:
+        print(f"[{level}] {text}")
+    print("\nEnabled packages by tier: " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())))
+    sections = [("Bloat you could disable", candidates), ("Optional apps (disable only if never used)", optional),
+                ("Caution: each one removes a feature", caution),
+                ("Unknown system packages: research before touching", unknown)]
+    for title, items in sections:
+        if items:
+            print(f"\n{title} ({len(items)}):")
+            print_table([[r["package"], r["label"], r["why"] or ""] for r in items], ["Package", "Label", "Why"])
+    off = report["already_disabled"]
+    if off:
+        print(f"\nAlready disabled ({len(off)}): " + ", ".join(r["package"] for r in off))
+    print("\nNothing was changed. Full details: tvkit audit --json")
+    return EXIT_OK
+
+
+def cmd_explain(args):
+    pkg = validate_pkg(args.package)
+    kb = load_kb()
+    entry = kb["packages"].get(pkg) or {}
+    data = {"package": pkg, "label": label_for(pkg, kb), "kb": entry, "sources": source_urls(entry, kb)}
+    verdict = None
+    try:
+        dev = get_device(args)
+    except TvkitError as e:
+        dev = None
+        data["device"] = f"not checked ({e})"
+    if dev:
+        facts = package_facts(dev, pkg)
+        data["device"] = facts or "not installed for user 0"
+        if facts:
+            tier, why = classify(pkg, kb, system=facts["system"])
+            live = live_block_reason(pkg, facts, live_context(dev))
+            data["tier"] = tier
+            data["live_protection"] = live
+            if live or tier == "protected":
+                verdict = f"tvkit refuses to disable it: {live or why.get('why')}"
+            elif tier == "caution":
+                verdict = "tvkit would need --allow-caution plus the user's explicit OK (a feature goes away)"
+            elif tier == "unknown":
+                verdict = "tvkit would need --allow-unknown: research it first, or record findings with `tvkit learn`"
+            else:
+                verdict = "tvkit can disable it (reversible with `tvkit undo`)"
+    data["verdict"] = verdict
+    if args.json:
+        emit_json(data)
+        return EXIT_OK
+    print(f"{pkg} — {data['label']}")
+    if entry:
+        print(f"  tier: {entry.get('tier')}{' (your local note)' if entry.get('local') else ''}")
+        for k in ("why", "breaks"):
+            if entry.get(k):
+                print(f"  {k}: {entry[k]}")
+        for url in data["sources"]:
+            print(f"  source: {url}")
+    else:
+        print("  Not in tvkit's knowledge base.")
+    if isinstance(data.get("device"), dict):
+        f = data["device"]
+        print(f"  on this TV: {'system' if f['system'] else 'user'} app, uid {f['uid']}, "
+              f"{ENABLED_STATES.get(f['enabled_state'], '?')}{', persistent' if f['persistent'] else ''}")
+    elif data.get("device"):
+        print(f"  on this TV: {data['device']}")
+    if verdict:
+        print(f"  verdict: {verdict}")
+    return EXIT_OK
+
+
+def cmd_apps(args):
+    dev = get_device(args)
+    kb = load_kb()
+    launch_out, system_out, disabled_out = dev.sh_many(
+        [LAUNCHABLE_QUERY, "pm list packages -s --user 0", "pm list packages -d --user 0"])
+    launchable = parse_components(launch_out)
+    system = set(parse_pkg_lines(system_out))
+    disabled = set(parse_pkg_lines(disabled_out))
+    apps = []
+    for pkg, comp in sorted(launchable.items()):
+        tier, _ = classify(pkg, kb, system=pkg in system)
+        apps.append({"package": pkg, "label": label_for(pkg, kb), "activity": comp, "system": pkg in system,
+                     "enabled": pkg not in disabled, "tier": tier})
+    if args.json:
+        emit_json(apps)
+    else:
+        print_table([[a["label"], a["package"], a["tier"], "system" if a["system"] else "user"] for a in apps],
+                    ["App", "Package", "Tier", "Origin"])
+    return EXIT_OK
+
+
+def cmd_home(args):
+    dev = get_device(args)
+    ctx = live_context(dev)
+    candidates = {pkg: comp for pkg, comp in parse_components(dev.sh(HOME_QUERY)).items()
+                  if "FallbackHome" not in comp and pkg != "android"
+                  and not re.search(r"setup|provision|setupwraith", pkg, re.I)}
+    if args.action == "swap":
+        return home_swap(dev, args, ctx, candidates)
+    if args.action != "set":
+        data = {"current": ctx["home_component"], "candidates": sorted(candidates.values())}
+        if args.json:
+            emit_json(data)
+        else:
+            print(f"Current Home app: {data['current']}")
+            print("Installed Home-capable apps:\n  " + "\n  ".join(data["candidates"] or ["(none found)"]))
+        return EXIT_OK
+    target = args.component or ""
+    if PKG_RE.match(target) and target in candidates:
+        target = candidates[target]
+    if not COMPONENT_RE.match(target) or target.split("/")[0] not in candidates:
+        raise TvkitError(f"{args.component!r} is not an installed Home app. Candidates: {', '.join(candidates.values())}")
+    print(f"Plan: make {target} the Home app (currently {ctx['home_component']}).\n"
+          "Caveat: on some TCL/Google TV firmware this reports Success but the Home button still opens the stock "
+          "launcher (HWBusters, TCL 98C7K). Verify with the real remote. Nothing is disabled. Undo: tvkit undo")
+    confirm(args)
+    take_snapshot(dev, "pre-home")
+    batch = Batch(dev, args.reason or "set Home app")
+    out = dev.sh(f"cmd package set-home-activity --user 0 {target}").strip()
+    now = live_context(dev)["home_component"]
+    batch.log({"kind": "home", "target": "home", "before": ctx["home_component"], "after": now, "output": out})
+    print(f"{out or 'done'} · Home now resolves to {now}")
+    print("Press Home on the real remote to confirm it really opens the new launcher.")
+    return EXIT_OK
+
+
+def home_swap(dev, args, ctx, candidates):
+    """Make an installed launcher the real Home by switching off the stock one, with checks and auto-rollback.
+
+    Stock launchers often register Home at a higher intent priority than any installable app can, so Android
+    ignores `set-home-activity` (seen on TCL). The only reversible fix is disabling the stock launcher. This is
+    the one sanctioned way tvkit touches the current Home app: the replacement must already be installed and
+    enabled, and if Home doesn't then open it, the stock launcher is switched straight back on.
+    """
+    target = validate_pkg((args.component or "").split("/")[0])
+    stock = ctx["home_package"]
+    if target not in candidates:
+        raise TvkitError(f"{target} isn't an installed, enabled Home app. Candidates: {', '.join(candidates) or 'none'}")
+    if not stock or stock == target:
+        print(f"{target} is already the Home app.")
+        return EXIT_OK
+    kb = load_kb()
+    facts = package_facts(dev, stock)
+    tier, entry = classify(stock, kb, system=bool(facts and facts["system"]))
+    if not facts or tier == "protected":
+        raise Refused(f"won't switch off {stock}: {entry.get('why') or 'not a known launcher'}")
+    print(f"Plan: switch off the stock Home app {stock} (pm disable-user, reversible) so the Home button opens "
+          f"{target}.\nChecks: Home must resolve to {target} and pressing Home must open it; if either fails, {stock} "
+          "is switched back on immediately. The stock home (and its Apps grid) is gone until you undo: tvkit undo")
+    confirm(args)
+    take_snapshot(dev, "pre-home-swap")
+    batch = Batch(dev, args.reason or f"home swap to {target}")
+    before = facts["enabled_state"]
+    out = dev.sh(f"pm disable-user --user 0 {stock}").strip()
+    after = (package_facts(dev, stock) or {}).get("enabled_state")
+    change = batch.log({"kind": "package", "target": stock, "before": before, "after": after, "tier": tier,
+                        "output": out, "note": f"home swap to {target}"})
+    resolved = live_context(dev)["home_package"]
+    opened = None
+    if resolved == target:
+        dev.sh("input keyevent KEYCODE_HOME")
+        sleep(4)
+        top = dev.sh("dumpsys activity activities | grep -m1 mResumedActivity")
+        opened = target if target + "/" in top else top.strip()
+    if resolved != target or opened != target:
+        set_pkg_state(dev, stock, before)
+        batch.log({"kind": "revert", "of": change["id"], "target": stock, "result": "rolled back", "ok": True})
+        raise TvkitError(f"Home didn't switch to {target} (resolves to {resolved}; opened {opened}). "
+                         f"{stock} was switched back on; nothing else changed.")
+    print(f"ok  Home now opens {target} ({stock} switched off).")
+    print("Press Home on the real remote to confirm. Back to the stock home any time: tvkit undo")
+    return EXIT_OK
+
+
+def cmd_snapshot(args):
+    dev = get_device(args)
+    d = take_snapshot(dev, args.label)
+    print(d)
+    return EXIT_OK
+
+
+def cmd_snapshots(args):
+    dev = get_device(args)
+    snaps = [dict(json.loads((d / "meta.json").read_text()), name=d.name) for d in list_snapshots(dev)]
+    if args.json:
+        emit_json(snaps)
+    else:
+        print_table([[s["name"], s.get("packages"), s.get("disabled"), s.get("home")] for s in snaps],
+                    ["Snapshot", "Packages", "Disabled", "Home"])
+    return EXIT_OK
+
+
+def cmd_journal(args):
+    dev = get_device(args)
+    entries = journal_read(dev)
+    active = {e["id"] for e in active_changes(entries)}
+    changes = [e for e in entries if e.get("kind") in ("package", "setting", "home", "maintenance")]
+    if args.json:
+        emit_json([dict(e, active=e.get("id") in active) for e in changes])
+        return EXIT_OK
+    if not changes:
+        print("No changes recorded for this TV.")
+        return EXIT_OK
+
+    def fmt(e, k):
+        v = e.get(k)
+        return ENABLED_STATES.get(v, v) if e.get("kind") == "package" else v
+    print_table([[e["batch"], e["kind"], e.get("target"), fmt(e, "before"), fmt(e, "after"),
+                  "active" if e.get("id") in active else ("undone" if e.get("kind") != "maintenance" else "-")]
+                 for e in changes], ["Batch", "Kind", "Target", "Before", "After", "Status"])
+    return EXIT_OK
+
+
+# ----------------------------------------------------------------------------- commands: changes
+
+def cmd_disable(args):
+    pkgs = [validate_pkg(p) for p in args.packages]
+    limit = min(args.max, HARD_MAX_BATCH)
+    if len(pkgs) > limit:
+        raise Refused(f"{len(pkgs)} packages at once is too many: do at most {limit} per batch and test in between.")
+    dev = get_device(args)
+    kb = load_kb()
+    ctx = live_context(dev)
+    plan, refused, skipped = [], [], []
+    for pkg in dict.fromkeys(pkgs):
+        facts = package_facts(dev, pkg)
+        if not facts or not facts["installed"]:
+            skipped.append((pkg, "not installed for this user"))
+            continue
+        if facts["enabled_state"] in (2, 3, 4):
+            skipped.append((pkg, f"already {ENABLED_STATES[facts['enabled_state']]}"))
+            continue
+        tier, entry = classify(pkg, kb, system=facts["system"])
+        live = live_block_reason(pkg, facts, ctx)
+        if live:
+            refused.append((pkg, live))
+        elif tier == "protected":
+            refused.append((pkg, f"protected: {entry.get('why')} {entry.get('breaks') or ''}".strip()))
+        elif tier == "caution" and not args.allow_caution:
+            refused.append((pkg, f"caution: {entry.get('breaks') or entry.get('why')} Needs --allow-caution "
+                                 "after the user agrees to lose that feature."))
+        elif tier == "unknown" and not args.allow_unknown:
+            refused.append((pkg, "unknown system package: research what it does first (then `tvkit learn`, or "
+                                 "--allow-unknown with the user's OK)."))
+        else:
+            plan.append((pkg, tier, label_for(pkg, kb), entry.get("breaks") or entry.get("why") or ""))
+    for pkg, why in skipped:
+        print(f"skip    {pkg}: {why}")
+    for pkg, why in refused:
+        print(f"REFUSED {pkg}: {why}")
+    if not plan:
+        if refused:
+            raise Refused("Nothing to do: every requested package was refused by a safety rule.")
+        print("Nothing to do.")
+        return EXIT_OK
+    print(f"\nPlan: disable {len(plan)} package(s) for user 0 with `pm disable-user` (reversible, app data kept):")
+    print_table([[p, t, l, n] for p, t, l, n in plan], ["Package", "Tier", "Label", "Note"])
+    print("Undo afterwards with: tvkit undo")
+    confirm(args)
+    snap = take_snapshot(dev, "pre-disable")
+    batch = Batch(dev, args.reason or "disable packages")
+    lost = False
+    for pkg, tier, _, _ in plan:
+        before = package_facts(dev, pkg)["enabled_state"]
+        out = dev.sh(f"pm disable-user --user 0 {pkg}").strip()
+        after = (package_facts(dev, pkg) or {}).get("enabled_state")
+        batch.log({"kind": "package", "target": pkg, "before": before, "after": after, "tier": tier, "output": out})
+        print(f"{'ok' if after == 3 else 'FAILED':6}  {pkg}: {out or 'no output'}")
+        try:
+            if dev.sh("echo tvkit-alive", timeout=10).strip() != "tvkit-alive":
+                lost = True
+        except TvkitError:
+            lost = True
+        if lost:
+            print(f"\n!! Lost the connection right after disabling {pkg}. Stopping. If the TV dropped Wi-Fi, "
+                  "reconnect it (Ethernet works too) and run `tvkit undo`. See /tvkit:restore.")
+            return EXIT_ERR
+    print(f"\nBatch {batch.id} done. Snapshot before it: {snap.name}\n")
+    print(TEST_CHECKLIST)
+    return EXIT_OK
+
+
+def cmd_enable(args):
+    pkgs = [validate_pkg(p) for p in args.packages]
+    dev = get_device(args)
+    live = read_live_state(dev)
+    plan = []
+    for pkg in dict.fromkeys(pkgs):
+        if pkg in live["installed"]:
+            if pkg in live["disabled"]:
+                plan.append((pkg, "enable"))
+            else:
+                print(f"skip    {pkg}: already enabled")
+        elif pkg in live["known"]:
+            plan.append((pkg, "reinstall-for-user"))
+        else:
+            print(f"skip    {pkg}: not on this TV")
+    if not plan:
+        print("Nothing to do.")
+        return EXIT_OK
+    print_table(plan, ["Package", "Action"])
+    confirm(args)
+    take_snapshot(dev, "pre-enable")
+    batch = Batch(dev, args.reason or "enable packages")
+    for pkg, action in plan:
+        if action == "reinstall-for-user":
+            out = dev.sh(f"cmd package install-existing --user 0 {pkg}").strip()
+            print(f"{pkg}: {out}")
+            continue
+        before = package_facts(dev, pkg)["enabled_state"]
+        out = set_pkg_state(dev, pkg, 0)
+        after = (package_facts(dev, pkg) or {}).get("enabled_state")
+        batch.log({"kind": "package", "target": pkg, "before": before, "after": after, "output": out})
+        print(f"{'ok' if after in (0, 1) else 'FAILED':6}  {pkg}: {out}")
+    return EXIT_OK
+
+
+def cmd_undo(args):
+    dev = get_device(args)
+    entries = journal_read(dev)
+    active = active_changes(entries)
+    if not active:
+        print("Nothing to undo: tvkit has no active changes on this TV.")
+        return EXIT_OK
+    if args.all:
+        targets = active
+    else:
+        batch_id = args.batch or active[-1]["batch"]
+        targets = [e for e in active if e["batch"] == batch_id]
+        if not targets:
+            raise TvkitError(f"No active changes in batch {batch_id}. See `tvkit journal`.")
+    targets = list(reversed(targets))
+
+    def show(e, k):
+        v = e.get(k)
+        return ENABLED_STATES.get(v, v) if e["kind"] == "package" else v
+    print(f"Plan: revert {len(targets)} change(s):")
+    print_table([[e["batch"], e["kind"], e["target"], f"{show(e, 'after')} -> {show(e, 'before')}"] for e in targets],
+                ["Batch", "Kind", "Target", "Change"])
+    confirm(args, "Revert these changes?")
+    take_snapshot(dev, "pre-undo")
+    undo_batch = Batch(dev, "undo")
+    failures = 0
+    for e in targets:
+        ok, now = revert_entry(dev, e)
+        failures += 0 if ok else 1
+        undo_batch.log({"kind": "revert", "of": e["id"], "target": e["target"], "result": now, "ok": ok})
+        print(f"{'ok' if ok else 'CHECK':6}  {e['target']} -> {now}")
+    if failures:
+        print(f"\n{failures} item(s) didn't verify. Run `tvkit audit` and check them by hand.")
+        return EXIT_ERR
+    print("\nReverted. Re-test Home, inputs and the remote.")
+    return EXIT_OK
+
+
+def cmd_restore(args):
+    dev = get_device(args)
+    snap_dir = find_snapshot(dev, args.snapshot)
+    snap = read_state_from_snapshot(snap_dir)
+    now = read_live_state(dev)
+    ctx = live_context(dev)
+    plan = []
+    for pkg in sorted(now["disabled"] - snap["disabled"]):
+        if pkg in snap["installed"]:
+            plan.append(("enable", pkg, None))
+    for pkg in sorted((snap["disabled"] - now["disabled"]) & now["installed"]):
+        if pkg in (ctx["home_package"], ctx["ime_package"]):
+            print(f"skip    {pkg}: it is the current Home app/keyboard now; not re-disabling it")
+            continue
+        plan.append(("disable", pkg, None))
+    for pkg in sorted(snap["installed"] - now["installed"]):
+        if pkg in now["known"]:
+            plan.append(("reinstall-for-user", pkg, None))
+    touched = {(e["ns"], e["key"]) for e in journal_read(dev) if e.get("kind") == "setting"}
+    for ns, key in sorted(touched):
+        old, cur = snap["settings"][ns].get(key), now["settings"][ns].get(key)
+        if old != cur and key not in DANGEROUS_SETTINGS:
+            plan.append(("setting", f"{ns}/{key}", old))
+    if snap["home"] and now["home"] and snap["home"] != now["home"]:
+        plan.append(("home", "home", snap["home"]))
+    if not plan:
+        print(f"The TV already matches {snap_dir.name} for everything tvkit manages.")
+        return EXIT_OK
+    print(f"Plan: return to snapshot {snap_dir.name}:")
+    print_table([[a, t, "" if v is None else v] for a, t, v in plan], ["Action", "Target", "Value"])
+    confirm(args, "Restore this snapshot?")
+    take_snapshot(dev, "pre-restore")
+    batch = Batch(dev, f"restore {snap_dir.name}")
+    for action, target, value in plan:
+        if action in ("enable", "disable"):
+            before = (package_facts(dev, target) or {}).get("enabled_state")
+            out = set_pkg_state(dev, target, 0 if action == "enable" else 3)
+            after = (package_facts(dev, target) or {}).get("enabled_state")
+            batch.log({"kind": "package", "target": target, "before": before, "after": after, "output": out})
+            print(f"{action:8} {target}: {out}")
+        elif action == "reinstall-for-user":
+            print(f"reinstall {target}: {dev.sh(f'cmd package install-existing --user 0 {target}').strip()}")
+        elif action == "setting":
+            ns, key = target.split("/", 1)
+            before = read_setting(dev, ns, key)
+            after = write_setting(dev, ns, key, value)
+            batch.log({"kind": "setting", "target": target, "ns": ns, "key": key, "before": before, "after": after})
+            print(f"setting  {target}: {before} -> {after}")
+        elif action == "home":
+            before = live_context(dev)["home_component"]
+            dev.sh(f"cmd package set-home-activity --user 0 {value}")
+            after = live_context(dev)["home_component"]
+            batch.log({"kind": "home", "target": "home", "before": before, "after": after})
+            print(f"home     {before} -> {after}")
+    print("\nRestored. Re-test Home, inputs and the remote.")
+    return EXIT_OK
+
+
+def cmd_learn(args):
+    pkg = validate_pkg(args.package)
+    base = json.loads(KB_PATH.read_text())
+    curated = base["packages"].get(pkg, {})
+    if curated.get("tier") == "protected" and args.tier != "protected":
+        raise Refused(f"{pkg} is protected in the curated knowledge base; local notes can't change that.")
+    if prefix_protected(pkg, base) and args.tier != "protected" and not curated:
+        raise Refused(f"{pkg} belongs to a protected platform namespace; local notes can't change that.")
+    path = STATE / "overrides.json"
+    local = json.loads(path.read_text()) if path.exists() else {}
+    local[pkg] = {"label": args.label, "tier": args.tier, "why": args.why, "src": [args.source], "learned": iso_now()}
+    STATE.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(local, indent=2) + "\n")
+    print(f"Saved your note on {pkg} ({args.tier}) to {path}.\nIf it's solid, contribute it upstream to "
+          "data/packages.json with the source.")
+    return EXIT_OK
+
+
+def cmd_set(args):
+    value = None if args.cmd == "unset" else args.value
+    check_setting(args.namespace, args.key, value)
+    dev = get_device(args)
+    before = read_setting(dev, args.namespace, args.key)
+    if before == value:
+        print(f"{args.namespace}/{args.key} is already {value}.")
+        return EXIT_OK
+    print(f"Plan: {args.namespace}/{args.key}: {before} -> {value if value is not None else '(deleted)'}  "
+          "(undo: tvkit undo)")
+    confirm(args)
+    take_snapshot(dev, f"pre-{args.cmd}")
+    batch = Batch(dev, args.reason or f"{args.cmd} {args.namespace}/{args.key}")
+    after = write_setting(dev, args.namespace, args.key, value)
+    batch.log({"kind": "setting", "target": f"{args.namespace}/{args.key}", "ns": args.namespace,
+               "key": args.key, "before": before, "after": after})
+    print(f"{'ok' if after == value else 'CHECK'}  {args.namespace}/{args.key} = {after}")
+    return EXIT_OK
+
+
+def cmd_animations(args):
+    dev = get_device(args)
+    current = {k: read_setting(dev, "global", k) for k in ANIMATION_KEYS}
+    if args.value is None:
+        for k, v in current.items():
+            print(f"{k} = {v or '1 (default)'}")
+        return EXIT_OK
+    try:
+        number = float(args.value)
+    except ValueError:
+        raise TvkitError("animation scale must be a number such as 0.5")
+    if not 0 <= number <= 10:
+        raise TvkitError("animation scale must be between 0 and 10")
+    value = f"{number:g}"
+    print(f"Plan: set {', '.join(ANIMATION_KEYS)} to {value} (currently "
+          f"{', '.join(v or '1' for v in current.values())}). 0.5 is the sweet spot; 0 can make some apps glitch. "
+          "Undo: tvkit undo")
+    confirm(args)
+    take_snapshot(dev, "pre-animations")
+    batch = Batch(dev, args.reason or f"animations {value}")
+    for k in ANIMATION_KEYS:
+        after = write_setting(dev, "global", k, value)
+        batch.log({"kind": "setting", "target": f"global/{k}", "ns": "global", "key": k,
+                   "before": current[k], "after": after})
+        print(f"{'ok' if after == value else 'CHECK'}  {k} = {after}")
+    return EXIT_OK
+
+
+def cmd_cache(args):
+    dev = get_device(args)
+    i = gather_info(dev)
+    free, total = i["storage_free_gb"], i["storage_total_gb"]
+    tight = free is not None and total and (free < SAFE_FREE_GB or free / total < SAFE_FREE_RATIO)
+    if not tight and not args.force:
+        print(f"Storage is fine ({free} GB free of {total} GB). Clearing app caches now would not make the TV "
+              "faster; apps would rebuild them and first launches get slower. Skipping (use --force anyway).")
+        return EXIT_OK
+    print(f"Plan: trim every app's cache with `pm trim-caches` ({free} GB free of {total} GB now). "
+          "Caches are rebuilt automatically; logins and app data are untouched.")
+    confirm(args)
+    dev.sh("pm trim-caches 999G", timeout=300)
+    after = gather_info(dev)["storage_free_gb"]
+    Batch(dev, "trim caches").log({"kind": "maintenance", "target": "caches", "before": free, "after": after})
+    print(f"Done: {free} GB -> {after} GB free.")
+    return EXIT_OK
+
+
+def cmd_reboot(args):
+    dev = get_device(args)
+    print(f"Plan: restart {dev.serial} normally (no data changes). It comes back on the network in ~1-2 min.")
+    confirm(args, "Restart the TV now?")
+    adb("reboot", serial=dev.serial, timeout=20)
+    if not args.wait:
+        print("Rebooting. When the TV is back: tvkit status")
+        return EXIT_OK
+    print("Rebooting; waiting for it to come back...", flush=True)
+    sleep(20)
+    deadline = time.time() + 240
+    while time.time() < deadline:
+        if ":" in dev.serial:
+            adb("connect", dev.serial, timeout=10)
+        if adb_devices().get(dev.serial) == "device":
+            if dev.sh("getprop sys.boot_completed", timeout=10).strip() == "1":
+                print("Back online.")
+                return EXIT_OK
+        sleep(5)
+    raise TvkitError("The TV didn't come back within 4 minutes. Check it, then `tvkit connect`.")
+
+
+# ----------------------------------------------------------------------------- commands: control & capture
+
+def cmd_screenshot(args):
+    dev = get_device(args)
+    code, data, err = adb("exec-out", "screencap", "-p", serial=dev.serial, timeout=45, binary=True)
+    if code != 0 or not data.startswith(b"\x89PNG"):
+        raise TvkitError("Screenshot failed. Some TVs return nothing while protected video plays; press Home and retry.")
+    path = dev.dir / "screens" / f"{stamp()}-{slug(args.name, 'screen')}.png"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    print(path)
+    return EXIT_OK
+
+
+def cmd_ui_dump(args):
+    dev = get_device(args)
+    remote = "/sdcard/tvkit-ui.xml"
+    out = dev.sh(f"uiautomator dump {remote}", timeout=45)
+    if "dumped to" not in out.lower():
+        raise TvkitError(f"uiautomator dump failed: {out.strip() or 'no output'}. It fails while video plays or the "
+                         "screen animates; try on a still screen.")
+    _, data, _ = adb("exec-out", "cat", remote, serial=dev.serial, binary=True)
+    dev.sh(f"rm -f {remote}")
+    path = dev.dir / "screens" / f"{stamp()}-ui.xml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    try:
+        nodes = []
+        for n in ET.fromstring(data.decode("utf-8", "replace")).iter("node"):
+            text, desc = n.get("text", ""), n.get("content-desc", "")
+            if text or desc or n.get("focused") == "true":
+                nodes.append((text, desc, n.get("bounds", ""), "focused" if n.get("focused") == "true" else ""))
+        if nodes:
+            print_table(nodes[:80], ["Text", "Description", "Bounds", "Focus"])
+    except ET.ParseError:
+        pass
+    print(path)
+    return EXIT_OK
+
+
+def cmd_key(args):
+    dev = get_device(args)
+    codes = []
+    for k in args.keys:
+        code = KEYS.get(k.upper()) or (k.upper() if re.fullmatch(r"KEYCODE_[A-Z0-9_]+", k.upper()) else None)
+        if not code:
+            raise TvkitError(f"unknown key {k!r}. Known: {', '.join(sorted(KEYS))}, or any KEYCODE_*")
+        codes.append(code)
+    for code in codes:
+        # --long holds the key (like holding OK on the remote), which opens the context menu on TV launchers.
+        dev.sh(f"input keyevent {'--longpress ' if args.long else ''}{code}")
+        sleep(args.delay)  # also after the last key, so a following screenshot sees a settled screen
+    print("ok")
+    return EXIT_OK
+
+
+def cmd_text(args):
+    text = " ".join(args.text)
+    if not re.fullmatch(r"[A-Za-z0-9 .,_@:+-]{1,200}", text):
+        raise TvkitError("text may contain letters, digits, spaces and . , _ @ : + - only")
+    get_device(args).sh("input text '" + text.replace(" ", "%s") + "'")
+    print("ok")
+    return EXIT_OK
+
+
+def cmd_launch(args):
+    pkg = validate_pkg(args.package)
+    dev = get_device(args)
+    comp = None
+    for category in ("LEANBACK_LAUNCHER", "LAUNCHER"):
+        comp = parse_component(dev.sh("cmd package resolve-activity --brief -a android.intent.action.MAIN "
+                                      f"-c android.intent.category.{category} {pkg}"))
+        if comp and comp.startswith(pkg + "/"):
+            break
+        comp = None
+    if not comp:
+        raise TvkitError(f"{pkg} has no launchable activity (is it installed and enabled?). See `tvkit apps`.")
+    out = dev.sh(f"am start -n {comp}")
+    if "Error" in out:
+        raise TvkitError(out.strip())
+    print(f"launched {comp}")
+    return EXIT_OK
+
+
+def cmd_push_wallpaper(args):
+    src = Path(args.file).expanduser()
+    if not src.is_file():
+        raise TvkitError(f"no such file: {src}")
+    if src.suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp"):
+        raise TvkitError("wallpaper must be .png, .jpg or .webp")
+    if src.stat().st_size > 25 * 1024 * 1024:
+        raise TvkitError("wallpaper is over 25 MB; export a 1920x1080 image instead")
+    dev = get_device(args)
+    remote = f"/sdcard/Pictures/tvkit/{slug(src.stem, 'wallpaper')}{src.suffix.lower()}"
+    dev.sh("mkdir -p /sdcard/Pictures/tvkit")
+    code, out, err = adb("push", str(src), remote, serial=dev.serial, timeout=180)
+    if code != 0:
+        raise TvkitError((err or out).strip())
+    dev.sh(f"am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file://{remote}")
+    print(remote)
+    return EXIT_OK
+
+
+# ----------------------------------------------------------------------------- commands: benchmark
+
+def _idle_cpu(dev, seconds=10):
+    wait = max(1, round(seconds * SLEEP_SCALE))
+    out = dev.sh(f"head -1 /proc/stat; sleep {wait}; head -1 /proc/stat", timeout=wait + 20)
+    samples = [list(map(int, l.split()[1:9])) for l in out.splitlines() if l.startswith("cpu ")]
+    if len(samples) < 2:
+        return None
+    (a, b) = samples[:2]
+    total, idle = sum(b) - sum(a), (b[3] + b[4]) - (a[3] + a[4])
+    return round(100.0 * (1 - idle / total), 2) if total > 0 else None
+
+
+def _home_pss_mb(dev, home_pkg):
+    if not home_pkg:
+        return None
+    out = dev.sh(f"dumpsys meminfo {home_pkg}", timeout=30)
+    m = re.search(r"TOTAL PSS:\s+(\d+)", out) or re.search(r"^\s*TOTAL\s+(\d+)", out, re.M)
+    return round(int(m.group(1)) / 1024, 1) if m else None
+
+
+def cmd_bench(args):
+    dev = get_device(args)
+    kb = load_kb()
+    launchable = parse_components(dev.sh(LAUNCHABLE_QUERY))
+    if args.apps:
+        apps = [validate_pkg(a.strip()) for a in args.apps.split(",") if a.strip()]
+        missing = [a for a in apps if a not in launchable]
+        if missing:
+            raise TvkitError(f"not launchable on this TV: {', '.join(missing)} (see `tvkit apps`)")
+    else:
+        apps = [p for p in DEFAULT_BENCH_APPS if p in launchable][:3]
+        system = set(parse_pkg_lines(dev.sh("pm list packages -s --user 0")))
+        apps += [p for p in sorted(launchable) if p not in apps and p not in system][:3 - len(apps)]
+    if not apps:
+        raise TvkitError("No apps to benchmark; pass --apps pkg1,pkg2")
+    minutes = len(apps) * args.runs * 8 / 60 + 0.5
+    print(f"Plan: cold-launch {', '.join(label_for(a, kb) for a in apps)} {args.runs}x each (force-stop, "
+          f"`am start -W`, back to Home), then measure idle CPU and memory. About {minutes:.0f} min; the TV will "
+          "open and close apps on screen. Don't touch the remote. Nothing is changed.")
+    confirm(args, "Start the benchmark?")
+    ctx = live_context(dev)
+    info = gather_info(dev)
+    result = {"label": args.label, "created": iso_now(), "tvkit": VERSION, "runs": args.runs,
+              "model": info["model"], "fingerprint": info["build_fingerprint"],
+              "uptime_hours": info["uptime_hours"], "animation_scales": info["animation_scales"],
+              "storage_free_gb": info["storage_free_gb"], "apps": {}}
+    dev.sh("input keyevent KEYCODE_HOME")
+    sleep(3)
+    for pkg in apps:
+        comp, times, states = launchable[pkg], [], []
+        for _ in range(args.runs):
+            dev.sh(f"am force-stop {pkg}")
+            sleep(1.5)
+            out = dev.sh(f"am start -W -n {comp}", timeout=60)
+            t = re.search(r"TotalTime:\s*(\d+)", out)
+            s = re.search(r"LaunchState:\s*(\w+)", out)
+            if t:
+                times.append(int(t.group(1)))
+            states.append(s.group(1) if s else "?")
+            sleep(3)
+            dev.sh("input keyevent KEYCODE_HOME")
+            sleep(2)
+        dev.sh(f"am force-stop {pkg}")
+        result["apps"][pkg] = {"label": label_for(pkg, kb), "runs_ms": times, "launch_states": states,
+                               "median_ms": statistics.median(times) if times else None,
+                               "min_ms": min(times) if times else None, "max_ms": max(times) if times else None}
+        print(f"  {label_for(pkg, kb):24} median {result['apps'][pkg]['median_ms']} ms  runs {times}", flush=True)
+    dev.sh("input keyevent KEYCODE_HOME")
+    sleep(5)
+    result["idle_cpu_pct"] = _idle_cpu(dev)
+    mem = re.search(r"MemAvailable:\s+(\d+)", dev.sh("cat /proc/meminfo"))
+    result["mem_available_mb"] = round(int(mem.group(1)) / 1024) if mem else None
+    result["home_package"] = ctx["home_package"]
+    result["home_pss_mb"] = _home_pss_mb(dev, ctx["home_package"])
+    path = dev.dir / "bench" / f"{stamp()}-{slug(args.label, 'bench')}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(result, indent=2) + "\n")
+    print(f"Idle CPU {result['idle_cpu_pct']}% · RAM available {result['mem_available_mb']} MB · "
+          f"Home ({ctx['home_package']}) PSS {result['home_pss_mb']} MB")
+    print(path)
+    return EXIT_OK
+
+
+def _load_bench(dev, name):
+    base = dev.dir / "bench"
+    files = sorted(base.glob("*.json")) if base.exists() else []
+    hits = [f for f in files if f.stem == name or f.stem.endswith("-" + slug(name, "bench"))]
+    if not hits:
+        raise TvkitError(f"no benchmark labelled {name!r}. Run `tvkit bench --label {name}` first.")
+    return json.loads(hits[-1].read_text())
+
+
+def cmd_bench_compare(args):
+    dev = get_device(args)
+    a, b = _load_bench(dev, args.before), _load_bench(dev, args.after)
+    rows, data = [], []
+    for pkg in a["apps"]:
+        if pkg not in b["apps"]:
+            continue
+        x, y = a["apps"][pkg], b["apps"][pkg]
+        if x["median_ms"] is None or y["median_ms"] is None:
+            continue
+        delta = y["median_ms"] - x["median_ms"]
+        pct = 100.0 * delta / x["median_ms"]
+        overlap = not (y["max_ms"] < x["min_ms"] or y["min_ms"] > x["max_ms"])
+        verdict = ("no real change (within run-to-run noise)" if abs(pct) < 5 or overlap
+                   else ("faster" if delta < 0 else "slower"))
+        rows.append([x["label"], f"{x['median_ms']:g}", f"{y['median_ms']:g}", f"{pct:+.1f}%", verdict])
+        data.append({"package": pkg, "before_ms": x["median_ms"], "after_ms": y["median_ms"], "delta_pct": pct,
+                     "verdict": verdict})
+    extra = []
+    for key, unit in (("idle_cpu_pct", "%"), ("mem_available_mb", " MB"), ("home_pss_mb", " MB"),
+                      ("storage_free_gb", " GB"), ("uptime_hours", " h")):
+        if a.get(key) is not None and b.get(key) is not None:
+            extra.append([key, f"{a[key]}{unit}", f"{b[key]}{unit}", f"{b[key] - a[key]:+.2f}{unit}"])
+    if args.json:
+        emit_json({"apps": data, "system": extra, "before": a["label"], "after": b["label"]})
+        return EXIT_OK
+    print(f"Cold launch, median of {a['runs']} vs {b['runs']} runs ({a['label']} -> {b['label']}):")
+    print_table(rows, ["App", "Before ms", "After ms", "Change", "Verdict"])
+    print()
+    print_table(extra, ["Metric", "Before", "After", "Change"])
+    real = [r for r in data if not r["verdict"].startswith("no real")]
+    print("\nHonest summary: " + ("launch times changed beyond noise for " + ", ".join(
+        f"{r['package']} ({r['delta_pct']:+.0f}%)" for r in real) if real else
+        "no launch-time change beyond run-to-run noise. Perceived snappiness (animations, fewer ads) can still "
+        "be real; say so rather than claiming a speed-up."))
+    return EXIT_OK
+
+
+# ----------------------------------------------------------------------------- CLI
+
+def build_parser():
+    p = argparse.ArgumentParser(prog="tvkit", description=__doc__.split("\n\n")[0],
+                                formatter_class=argparse.RawDescriptionHelpFormatter,
+                                epilog="Start with: tvkit doctor, tvkit discover, tvkit connect <TV-IP>, tvkit audit")
+    p.add_argument("-V", "--version", action="version", version=f"tvkit {VERSION}")
+    p.add_argument("--device", help="adb serial to use (default: the saved TV)")
+    sub = p.add_subparsers(dest="cmd", metavar="command")
+
+    def add(name, func, help_text):
+        sp = sub.add_parser(name, help=help_text, description=help_text)
+        sp.set_defaults(func=func)
+        sp.add_argument("--device", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+        return sp
+
+    def changes(sp):
+        sp.add_argument("--yes", "-y", action="store_true", help="apply (otherwise only the plan is printed)")
+        sp.add_argument("--reason", help="note stored in the journal")
+        return sp
+
+    add("doctor", cmd_doctor, "check adb, the network path to the TV and the ADB session")
+    sp = add("discover", cmd_discover, "find Android/Google TVs on the local network (mDNS; --scan probes TV ports)")
+    sp.add_argument("--timeout", type=float, default=5)
+    sp.add_argument("--scan", action="store_true",
+                    help="also probe this computer's /24 network for TV ports (5555 adb, 6466 Android TV remote, "
+                         "8009 Cast); plain TCP connects, no prompts on any device")
+    sp.add_argument("--json", action="store_true")
+    sp = add("connect", cmd_connect, "connect to a TV over Wi-Fi and save it")
+    sp.add_argument("target", nargs="?", help="IP or IP:PORT (default port 5555)")
+    sp.add_argument("--wait", type=int, default=60, help="seconds to wait for the on-TV approval")
+    sp = add("pair", cmd_pair, "pair with a TV that uses Android 11+ Wireless debugging")
+    sp.add_argument("target", help="IP:PORT from 'Pair device with pairing code'")
+    sp.add_argument("code", help="6-digit pairing code")
+    sp = add("disconnect", cmd_disconnect, "drop the ADB session (keeps the saved TV)")
+    sp.add_argument("target", nargs="?")
+    changes(add("lock", cmd_lock, "turn debugging off on the TV when you're done (ends access)"))
+
+    sp = add("status", cmd_status, "show the connected TV")
+    sp.add_argument("--json", action="store_true")
+    sp = add("info", cmd_info, "model, Android version, RAM, storage, uptime, launcher, health hints")
+    sp.add_argument("--json", action="store_true")
+    sp = add("audit", cmd_audit, "read-only: classify every installed package and report health")
+    sp.add_argument("--json", action="store_true")
+    sp = add("explain", cmd_explain, "what tvkit knows about one package and whether it would touch it")
+    sp.add_argument("package")
+    sp.add_argument("--json", action="store_true")
+    sp = add("apps", cmd_apps, "list launchable apps")
+    sp.add_argument("--launchable", action="store_true", help="(default) only apps with a TV launcher entry")
+    sp.add_argument("--json", action="store_true")
+    sp = changes(add("home", cmd_home, "show the Home app; `home set COMPONENT`, or `home swap PACKAGE` to switch "
+                                       "off the stock launcher with checks and auto-rollback (journaled)"))
+    sp.add_argument("action", nargs="?", choices=["show", "set", "swap"], default="show")
+    sp.add_argument("component", nargs="?", help="package or package/activity of an installed Home app")
+    sp.add_argument("--json", action="store_true")
+
+    sp = add("snapshot", cmd_snapshot, "save package states, settings and properties")
+    sp.add_argument("--label", default="manual")
+    sp = add("snapshots", cmd_snapshots, "list snapshots")
+    sp.add_argument("--json", action="store_true")
+    sp = add("journal", cmd_journal, "every change tvkit made on this TV")
+    sp.add_argument("--json", action="store_true")
+
+    sp = changes(add("disable", cmd_disable, "disable packages safely (pm disable-user, journaled)"))
+    sp.add_argument("packages", nargs="+")
+    sp.add_argument("--allow-caution", action="store_true", help="allow 'caution' packages (a feature goes away)")
+    sp.add_argument("--allow-unknown", action="store_true", help="allow researched packages not in the knowledge base")
+    sp.add_argument("--max", type=int, default=MAX_BATCH, help=f"batch size limit (default {MAX_BATCH})")
+    sp = changes(add("enable", cmd_enable, "re-enable packages (or reinstall ones removed for the user)"))
+    sp.add_argument("packages", nargs="+")
+    sp = changes(add("undo", cmd_undo, "revert the last batch (or --batch ID / --all)"))
+    sp.add_argument("--batch")
+    sp.add_argument("--all", action="store_true", help="revert every active tvkit change")
+    sp = changes(add("restore", cmd_restore, "return package states, tvkit-touched settings and Home to a snapshot"))
+    sp.add_argument("snapshot", nargs="?", default="baseline", help="snapshot name or label (default: baseline)")
+    sp = add("learn", cmd_learn, "record what you found out about a package (~/.tvkit/overrides.json)")
+    sp.add_argument("package")
+    sp.add_argument("--tier", required=True, choices=["protected", "caution", "bloat", "optional"])
+    sp.add_argument("--label", required=True)
+    sp.add_argument("--why", required=True)
+    sp.add_argument("--source", required=True, help="URL or note backing the claim")
+
+    sp = changes(add("set", cmd_set, "change one Android setting (old value journaled)"))
+    sp.add_argument("namespace", choices=["global", "secure", "system"])
+    sp.add_argument("key")
+    sp.add_argument("value")
+    sp = changes(add("unset", cmd_set, "delete one Android setting (old value journaled)"))
+    sp.add_argument("namespace", choices=["global", "secure", "system"])
+    sp.add_argument("key")
+    sp = changes(add("animations", cmd_animations, "show or set the three animation scales (0.5 recommended)"))
+    sp.add_argument("value", nargs="?")
+    sp = changes(add("cache", cmd_cache, "trim app caches (only when storage is actually tight)"))
+    sp.add_argument("--force", action="store_true")
+    sp = changes(add("reboot", cmd_reboot, "normal restart"))
+    sp.add_argument("--wait", action="store_true", help="wait until the TV is back")
+
+    sp = changes(add("bench", cmd_bench, "measure cold app-launch times, idle CPU and memory"))
+    sp.add_argument("--label", default="bench")
+    sp.add_argument("--apps", help="comma-separated packages (default: up to 3 popular apps)")
+    sp.add_argument("--runs", type=int, default=5)
+    sp = add("bench-compare", cmd_bench_compare, "compare two benchmarks honestly")
+    sp.add_argument("before")
+    sp.add_argument("after")
+    sp.add_argument("--json", action="store_true")
+
+    sp = add("screenshot", cmd_screenshot, "save a PNG of the TV screen; prints its path")
+    sp.add_argument("name", nargs="?", default="screen")
+    add("ui-dump", cmd_ui_dump, "save the on-screen UI tree (uiautomator); prints its path")
+    sp = add("key", cmd_key, "press remote keys: HOME BACK UP DOWN LEFT RIGHT CENTER ...")
+    sp.add_argument("keys", nargs="+")
+    sp.add_argument("--delay", type=float, default=0.4, help="seconds to wait after each key (default 0.4)")
+    sp.add_argument("--long", action="store_true", help="long-press (hold) each key, e.g. OK to open a tile's menu")
+    sp = add("text", cmd_text, "type text into the focused field")
+    sp.add_argument("text", nargs="+")
+    sp = add("launch", cmd_launch, "open an app by package name")
+    sp.add_argument("package")
+    sp = add("push-wallpaper", cmd_push_wallpaper, "copy an image to /sdcard/Pictures/tvkit/ for your launcher")
+    sp.add_argument("file")
+    return p
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if not getattr(args, "func", None):
+        parser.print_help()
+        return EXIT_OK
+    try:
+        return args.func(args) or EXIT_OK
+    except PlanOnly as e:
+        print(f"\n{e}")
+        return EXIT_PLAN
+    except Refused as e:
+        print(f"tvkit refused: {e}", file=sys.stderr)
+        return EXIT_REFUSED
+    except TvkitError as e:
+        print(f"tvkit: {e}", file=sys.stderr)
+        return EXIT_ERR
+    except KeyboardInterrupt:
+        print("\ninterrupted", file=sys.stderr)
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())
