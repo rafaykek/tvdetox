@@ -1,0 +1,17 @@
+{
+  "description": "tvkit guard: blocks destructive adb/fastboot commands so every TV change goes through tvkit (snapshot, safety checks, undo).",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/adb_guard.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
