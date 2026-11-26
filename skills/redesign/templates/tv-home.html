@@ -1,0 +1,1079 @@
+<title>Living Room TV Home</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+/* Layout: a 1920x1080 TV stage scaled into a bezel, with a control rail beside it that stacks under it on narrow screens.
+   The TV keeps its own dark palette (set from the config by script); the page around it follows the viewer's theme. */
+:root {
+  --pg-bg: #ECF0EF;
+  --pg-surface: #FFFFFF;
+  --pg-fg: #13201F;
+  --pg-muted: #536361;
+  --pg-line: #D2DBD9;
+  --pg-chip: #DFE7E5;
+  --pg-accent: #8F5400;
+  --pg-accent-soft: rgba(143, 84, 0, .12);
+  --pg-bezel: #0A0E0E;
+  --pg-scrim: rgba(8, 14, 14, .62);
+  --pg-shadow: 0 34px 60px -34px rgba(12, 32, 30, .55);
+  --key-red: #E5484D;
+  --key-green: #2FA36B;
+  --key-yellow: #E9C70A;
+  --key-blue: #3E63DD;
+  --f-display: ui-rounded, "SF Pro Rounded", "Nunito", "Varela Round", system-ui, sans-serif;
+  --f-body: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --f-mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --pg-bg: #0B1111;
+    --pg-surface: #121A1A;
+    --pg-fg: #E5ECEA;
+    --pg-muted: #92A29F;
+    --pg-line: #22302F;
+    --pg-chip: #192423;
+    --pg-accent: #F0B24A;
+    --pg-accent-soft: rgba(240, 178, 74, .14);
+    --pg-bezel: #040606;
+    --pg-scrim: rgba(0, 0, 0, .7);
+    --pg-shadow: 0 34px 60px -30px rgba(0, 0, 0, .85);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --pg-bg: #0B1111;
+  --pg-surface: #121A1A;
+  --pg-fg: #E5ECEA;
+  --pg-muted: #92A29F;
+  --pg-line: #22302F;
+  --pg-chip: #192423;
+  --pg-accent: #F0B24A;
+  --pg-accent-soft: rgba(240, 178, 74, .14);
+  --pg-bezel: #040606;
+  --pg-scrim: rgba(0, 0, 0, .7);
+  --pg-shadow: 0 34px 60px -30px rgba(0, 0, 0, .85);
+  color-scheme: dark;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+body { margin: 0; background: var(--pg-bg); color: var(--pg-fg); font: 15px/1.55 var(--f-body); -webkit-font-smoothing: antialiased; }
+img { max-width: 100%; }
+[hidden] { display: none !important; }
+button, input, select { font: inherit; color: inherit; }
+kbd { display: inline-block; min-width: 1.9em; text-align: center; font: 600 12px/1 var(--f-mono); padding: 4px 6px; border-radius: 6px; background: var(--pg-chip); border: 1px solid var(--pg-line); border-bottom-width: 2px; color: var(--pg-fg); }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+
+/* ---------- page chrome ---------- */
+.page { width: 100%; max-width: 1640px; margin-inline: auto; padding-block: 28px 44px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); display: grid; gap: 26px; }
+.page-head { display: grid; gap: 8px; }
+.eyebrow { font: 600 12px/1 var(--f-mono); letter-spacing: .14em; text-transform: uppercase; color: var(--pg-muted); }
+.page-head h1 { margin: 0; font: 700 clamp(28px, 3.4vw, 44px)/1.08 var(--f-display); letter-spacing: -.01em; text-wrap: balance; }
+.page-head p { margin: 0; max-width: 65ch; color: var(--pg-muted); font-size: 16px; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+.chip-pg { font: 600 12px/1 var(--f-mono); letter-spacing: .04em; padding: 7px 10px; border-radius: 999px; background: var(--pg-chip); color: var(--pg-muted); }
+.chip-pg.is-sample { background: var(--pg-accent-soft); color: var(--pg-accent); }
+.cfg-error { margin: 0; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--key-red); background: var(--pg-surface); color: var(--pg-fg); }
+
+.main { display: grid; grid-template-columns: minmax(0, 1fr) 292px; gap: 28px; align-items: start; }
+.tv-col { display: grid; gap: 16px; min-width: 0; }
+.tv-bezel { position: relative; padding: clamp(6px, .9vw, 12px); background: var(--pg-bezel); border-radius: clamp(12px, 1.6vw, 22px); box-shadow: var(--pg-shadow); }
+.tv-bezel::after { content: ""; position: absolute; left: 50%; bottom: 2px; width: 4px; height: 4px; margin-left: -2px; border-radius: 50%; background: #F2B54A; opacity: .85; }
+.tv-wrap { position: relative; width: 100%; max-width: 100%; aspect-ratio: 16 / 9; overflow: hidden; border-radius: clamp(5px, .7vw, 9px); background: #000; outline: none; }
+.tv-wrap:focus-visible { box-shadow: 0 0 0 3px var(--pg-accent); }
+
+.legend { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; font-size: 13px; color: var(--pg-muted); }
+.legend .keys { display: inline-flex; align-items: center; gap: 4px; }
+.legend .keys span { margin-left: 4px; }
+.ck { display: inline-flex; align-items: center; gap: 8px; padding: 6px 8px 6px 8px; border-radius: 999px; border: 1px solid var(--pg-line); background: var(--pg-surface); color: var(--pg-fg); font-size: 13px; cursor: pointer; }
+.ck i { width: 12px; height: 12px; border-radius: 50%; background: var(--k); box-shadow: inset 0 -2px 0 rgba(0, 0, 0, .25); }
+.ck:hover { border-color: var(--pg-muted); }
+.ck:focus-visible, .btn:focus-visible, .sw:focus-visible, .field:focus-visible { outline: 2px solid var(--pg-accent); outline-offset: 2px; }
+
+.rail { display: grid; gap: 22px; padding: 20px; background: var(--pg-surface); border: 1px solid var(--pg-line); border-radius: 16px; position: sticky; top: calc(env(safe-area-inset-top, 0px) + 16px); }
+.ctl { display: grid; gap: 10px; min-width: 0; }
+.ctl-title { margin: 0; font: 600 12px/1 var(--f-mono); letter-spacing: .12em; text-transform: uppercase; color: var(--pg-muted); }
+.ctl-hint { margin: 0; font-size: 13px; color: var(--pg-muted); }
+.seg { position: relative; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 4px; padding: 4px; border-radius: 12px; background: var(--pg-chip); }
+.seg input { position: absolute; opacity: 0; pointer-events: none; }
+.seg label { text-align: center; padding: 8px 6px; border-radius: 9px; font-weight: 600; font-size: 14px; color: var(--pg-muted); cursor: pointer; }
+.seg input:checked + label { background: var(--pg-surface); color: var(--pg-fg); box-shadow: 0 1px 2px rgba(0, 0, 0, .14); }
+.seg input:disabled + label { opacity: .45; cursor: not-allowed; }
+.seg input:focus-visible + label { outline: 2px solid var(--pg-accent); outline-offset: 1px; }
+.swatches { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 8px; }
+.sw { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--pg-line); background: transparent; color: var(--pg-fg); font-size: 13px; font-weight: 600; text-align: left; cursor: pointer; }
+.sw[aria-pressed="true"] { border-color: var(--pg-accent); background: var(--pg-accent-soft); }
+.sw-dots { display: inline-flex; flex: none; }
+.sw-dots i { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--pg-surface); box-shadow: 0 0 0 1px var(--pg-line); margin-left: -5px; }
+.sw-dots i:first-child { margin-left: 0; }
+.field { width: 100%; padding: 9px 10px; border-radius: 10px; border: 1px solid var(--pg-line); background: var(--pg-surface); color: var(--pg-fg); }
+.btn { display: inline-flex; justify-content: center; align-items: center; gap: 8px; padding: 10px 14px; border-radius: 10px; border: 0; background: var(--pg-fg); color: var(--pg-bg); font-weight: 600; text-decoration: none; cursor: pointer; }
+.check { display: flex; gap: 10px; align-items: center; font-size: 14px; cursor: pointer; }
+.check input { width: 18px; height: 18px; accent-color: var(--pg-accent); }
+
+.notes { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 24px 40px; }
+.notes h2 { margin: 0 0 12px; font: 700 20px/1.2 var(--f-display); }
+.notes ol { margin: 0; padding: 0; list-style: none; display: grid; gap: 12px; }
+.notes li { display: grid; gap: 2px; padding-left: 14px; border-left: 2px solid var(--pg-line); max-width: 62ch; }
+.notes li strong { font-weight: 650; }
+.notes li span { color: var(--pg-muted); }
+.page-foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 24px; padding-top: 18px; border-top: 1px solid var(--pg-line); font-size: 13px; color: var(--pg-muted); }
+
+.modal { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; padding: max(16px, env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) max(16px, env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px)); background: var(--pg-scrim); }
+.modal-card { width: min(920px, 100%); display: grid; gap: 14px; padding: 20px; border-radius: 16px; background: var(--pg-surface); border: 1px solid var(--pg-line); }
+.modal-card img { display: block; width: 100%; aspect-ratio: 16 / 9; border-radius: 10px; background: #000; }
+.modal-row { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; justify-content: space-between; }
+.modal-title { margin: 0; font: 700 20px/1.2 var(--f-display); }
+
+@media (max-width: 1040px) {
+  .main { grid-template-columns: minmax(0, 1fr); }
+  .rail { position: static; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+}
+
+/* ---------- the TV (logical 1920x1080; title-safe margins 96px / 54px) ---------- */
+.tv-stage { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; transform-origin: 0 0; overflow: hidden;
+  --tv-base: #0C1517; --tv-base-rgb: 12, 21, 23; --tv-text: #F5F0E6; --tv-text-rgb: 245, 240, 230; --tv-muted: #A9B5B2;
+  --tv-accent: #F2B54A; --tv-accent-glow: rgba(242, 181, 74, .55); --tv-glass: rgba(245, 240, 230, .13);
+  background: var(--tv-base); color: var(--tv-text); font-family: var(--f-body); -webkit-font-smoothing: antialiased; }
+.tv-wall { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; display: block; }
+.tv-scrim { position: absolute; inset: 0; pointer-events: none; }
+.tv-ui { position: absolute; inset: 0; }
+.tv-empty { position: absolute; left: 96px; top: 420px; margin: 0; font: 600 44px/1.2 var(--f-display); color: var(--tv-muted); }
+
+.tv-top { position: absolute; left: 96px; right: 96px; top: 54px; z-index: 3; display: flex; align-items: flex-start; justify-content: space-between; gap: 40px; }
+.tv-greet { font: 650 36px/1.15 var(--f-display); }
+.tv-date { margin-top: 8px; font: 500 26px/1.2 var(--f-body); color: var(--tv-muted); }
+.tv-top-right { display: flex; align-items: center; gap: 18px; }
+.tv-clock { margin-left: 14px; font: 600 46px/1 var(--f-display); font-variant-numeric: tabular-nums; }
+.tv-icon { width: 66px; height: 66px; padding: 0; border: 0; border-radius: 50%; display: grid; place-items: center; background: var(--tv-glass); color: var(--tv-text); cursor: pointer; }
+.tv-icon svg { width: 30px; height: 30px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+
+.tv-stage [data-nav] { transition: transform .2s cubic-bezier(.2, .75, .25, 1), box-shadow .2s, filter .2s, background-color .2s, color .2s; }
+.tv-stage [data-nav].is-focus { z-index: 2; transform: scale(1.09); box-shadow: 0 0 0 5px var(--tv-accent), 0 24px 48px -16px rgba(0, 0, 0, .7), 0 0 70px -12px var(--tv-accent-glow); }
+.tv-stage .tv-icon.is-focus { background: var(--tv-text); color: var(--tv-base); }
+
+.tile { position: relative; flex: none; padding: 0; border: 0; display: grid; place-items: center; background: var(--tile-bg); color: var(--glyph, #fff); font: 750 48px/1 var(--f-display); letter-spacing: .01em; cursor: pointer; }
+.tile-glyph { pointer-events: none; }
+.tile-label { position: absolute; top: calc(100% + 16px); left: 50%; transform: translateX(-50%); white-space: nowrap; font: 600 24px/1.1 var(--f-body); letter-spacing: 0; color: var(--tv-muted); pointer-events: none; }
+.tile.is-focus .tile-label { color: var(--tv-text); }
+.tile-input { background: linear-gradient(150deg, rgba(var(--tv-text-rgb), .22), rgba(var(--tv-text-rgb), .07)); color: var(--tv-text); box-shadow: inset 0 0 0 2px rgba(var(--tv-text-rgb), .14); }
+.tile-input .tile-glyph { display: grid; justify-items: center; gap: 10px; font: 700 24px/1 var(--f-mono); letter-spacing: .04em; }
+.tile-input svg, .pill-icon svg { width: 64px; height: 32px; fill: none; stroke: currentColor; stroke-width: 2.6; stroke-linejoin: round; stroke-linecap: round; }
+.has-focus .tile:not(.is-focus) { filter: brightness(.8) saturate(.85); }
+
+.chip { height: 64px; padding: 0 30px; border: 0; border-radius: 32px; background: var(--tv-glass); color: var(--tv-text); font: 600 26px/64px var(--f-body); white-space: nowrap; cursor: pointer; }
+.tv-stage .chip.is-focus { background: var(--tv-text); color: var(--tv-base); transform: scale(1.06); }
+.eyebrow-tv { font: 600 24px/1 var(--f-mono); letter-spacing: .14em; text-transform: uppercase; color: var(--tv-accent); }
+.hero-actions { display: flex; gap: 16px; margin-top: 36px; }
+
+/* ribbon: the focused app owns the screen, apps run along the bottom */
+.rb-hero { position: absolute; left: 96px; top: 290px; width: 1180px; z-index: 1; }
+.rb-title { margin: 20px 0 16px; font: 750 112px/1 var(--f-display); letter-spacing: -.015em; }
+.rb-note { margin: 0; max-width: 980px; font: 400 32px/1.35 var(--f-body); color: var(--tv-muted); }
+.rb-viewport { position: absolute; left: 0; right: 0; bottom: 40px; height: 260px; overflow: hidden; }
+.rb-track { position: relative; display: flex; align-items: flex-start; gap: 28px; width: max-content; padding: 40px 96px 0; transition: transform .32s cubic-bezier(.2, .75, .25, 1); }
+.rb-track .tile { width: 212px; height: 124px; border-radius: 24px; }
+.rb-sep { flex: none; width: 2px; height: 96px; margin: 14px 4px 0; border-radius: 1px; background: rgba(var(--tv-text-rgb), .2); }
+
+/* shelf: a large top shelf for the focused favourite, icon grid underneath */
+.sh-scroll { position: absolute; left: 0; right: 0; top: 0; transition: transform .34s cubic-bezier(.2, .75, .25, 1); }
+.sh-hero { position: relative; height: 620px; overflow: hidden; }
+.sh-art { position: absolute; inset: 0; background: radial-gradient(980px 680px at 74% 44%, var(--hero-a, rgba(242, 181, 74, .5)), transparent 72%), linear-gradient(90deg, rgba(var(--tv-base-rgb), .92) 26%, rgba(var(--tv-base-rgb), .35) 62%, rgba(var(--tv-base-rgb), .08)); -webkit-mask-image: linear-gradient(180deg, #000 62%, transparent 100%); mask-image: linear-gradient(180deg, #000 62%, transparent 100%); transition: background .3s; }
+.sh-glyph { position: absolute; right: 150px; top: 130px; font: 800 400px/1 var(--f-display); letter-spacing: -.04em; opacity: .42; }
+.sh-copy { position: absolute; left: 96px; top: 210px; width: 1040px; }
+.sh-title { margin: 20px 0 14px; font: 750 100px/1 var(--f-display); letter-spacing: -.015em; }
+.sh-note { margin: 0; max-width: 900px; font: 400 31px/1.35 var(--f-body); color: var(--tv-muted); }
+.sh-grid { display: grid; gap: 76px; padding: 8px 96px 90px; }
+.sh-row-title { margin: 0 0 18px; font: 600 24px/1 var(--f-mono); letter-spacing: .14em; text-transform: uppercase; color: var(--tv-muted); }
+.sh-tiles { display: flex; flex-wrap: wrap; gap: 32px; }
+.sh-tiles .tile { width: 266px; height: 160px; border-radius: 20px; font-size: 56px; }
+.sh-tiles .tile-label { opacity: 0; transition: opacity .2s; }
+.sh-tiles .tile.is-focus .tile-label { opacity: 1; }
+
+/* minimal: a big clock and favourites as large labels */
+.mn { position: absolute; left: 96px; right: 96px; top: 54px; bottom: 54px; display: flex; flex-direction: column; justify-content: space-between; }
+.mn-time { margin-top: 30px; font: 650 210px/.9 var(--f-display); letter-spacing: -.03em; font-variant-numeric: tabular-nums; }
+.mn-sub { margin-top: 22px; font: 500 36px/1.25 var(--f-body); color: var(--tv-muted); }
+.mn-bottom { display: grid; gap: 18px; }
+.mn-label { margin-top: 12px; font: 600 24px/1 var(--f-mono); letter-spacing: .14em; text-transform: uppercase; color: var(--tv-muted); }
+.mn-pills { display: flex; flex-wrap: wrap; gap: 18px; }
+.mn-icons { position: absolute; right: 96px; top: 54px; display: flex; gap: 18px; }
+.pill { display: inline-flex; align-items: center; gap: 18px; height: 88px; padding: 0 40px 0 30px; border: 0; border-radius: 44px; background: var(--tv-glass); color: var(--tv-text); font: 650 36px/1 var(--f-display); white-space: nowrap; cursor: pointer; }
+.pill-dot { flex: none; width: 22px; height: 22px; border-radius: 50%; background: var(--c); box-shadow: 0 0 0 3px rgba(var(--tv-text-rgb), .12); }
+.pill-icon { display: inline-grid; }
+.pill.sm { height: 66px; gap: 14px; padding: 0 30px 0 24px; font-size: 28px; }
+.pill.sm .pill-icon svg { width: 46px; height: 24px; }
+.tv-stage .pill.is-focus { background: var(--tv-text); color: var(--tv-base); transform: scale(1.06); }
+
+.tv-before { position: absolute; inset: 0; z-index: 8; background: #000; }
+.tv-before img { display: block; width: 100%; height: 100%; max-width: none; object-fit: contain; }
+.tv-tag { position: absolute; left: 40px; top: 36px; padding: 12px 22px; border-radius: 30px; background: rgba(0, 0, 0, .72); color: #fff; font: 700 26px/1 var(--f-mono); letter-spacing: .12em; text-transform: uppercase; }
+.tv-before-cap { position: absolute; left: 40px; bottom: 36px; max-width: 1400px; padding: 14px 22px; border-radius: 16px; background: rgba(0, 0, 0, .72); color: #fff; font: 500 26px/1.3 var(--f-body); }
+.tv-safe { position: absolute; left: 96px; right: 96px; top: 54px; bottom: 54px; z-index: 7; border: 2px dashed rgba(255, 255, 255, .5); border-radius: 4px; pointer-events: none; }
+.tv-safe span { position: absolute; right: 12px; bottom: 10px; font: 600 20px/1 var(--f-mono); letter-spacing: .06em; color: rgba(255, 255, 255, .75); }
+.tv-toast { position: absolute; left: 50%; top: 160px; z-index: 9; transform: translateX(-50%); display: grid; gap: 10px; justify-items: center; padding: 22px 38px; border-radius: 26px; background: rgba(var(--tv-base-rgb), .88); box-shadow: 0 0 0 2px rgba(var(--tv-text-rgb), .12), 0 30px 60px -20px rgba(0, 0, 0, .7); font: 650 32px/1.1 var(--f-display); white-space: nowrap; }
+.tv-toast small { font: 500 24px/1 var(--f-mono); color: var(--tv-muted); }
+
+/* full-screen renders used by the build script: #screen-ribbon, #screen-shelf, #screen-minimal, #screen-before, #wallpaper */
+html.mode-screen body { background: #000; }
+html.mode-screen .page-head, html.mode-screen .rail, html.mode-screen .legend, html.mode-screen .notes, html.mode-screen .page-foot { display: none !important; }
+html.mode-screen .page { display: block; max-width: none; padding: 0; }
+html.mode-screen .main { display: block; }
+html.mode-screen .tv-bezel { position: fixed; left: 0; top: 0; width: 1920px; height: 1080px; padding: 0; border-radius: 0; box-shadow: none; }
+html.mode-screen .tv-bezel::after { display: none; }
+/* #launcher: the page is the TV's real home screen inside the tvkit Home app (fills the screen at any density) */
+html.mode-launcher, html.mode-launcher body { overflow: hidden; cursor: none; }
+html.mode-launcher .tv-bezel { width: 100vw; height: 100vh; }
+html.mode-launcher .tv-safe { display: none !important; }
+/* TV graphics chips can't keep up with the mockup's effects. Blurred glows, animated box-shadow/filter and a
+   filter on every unfocused tile ran at about 16 fps on a TCL Android TV 9. On the real TV, only transform
+   animates, the focus ring is solid, and unfocused tiles are dimmed by a flat 20% black overlay, which is
+   exactly what brightness(.8) does, without a filter. */
+html.mode-launcher .tv-stage [data-nav] { transition: transform .2s cubic-bezier(.2, .75, .25, 1); }
+html.mode-launcher .tv-stage [data-nav].is-focus { box-shadow: 0 0 0 5px var(--tv-accent); }
+html.mode-launcher .has-focus .tile:not(.is-focus) { filter: none; }
+html.mode-launcher .tile::after { content: ""; position: absolute; inset: 0; border-radius: inherit; background: #000; opacity: 0; pointer-events: none; }
+html.mode-launcher .has-focus .tile:not(.is-focus)::after { opacity: .2; }
+html.mode-launcher .rb-track, html.mode-launcher .sh-scroll { will-change: transform; }
+html.mode-screen .tv-wrap { width: 1920px; height: 1080px; aspect-ratio: auto; border-radius: 0; }
+html.mode-wallpaper .tv-ui, html.mode-wallpaper .tv-scrim, html.mode-wallpaper .tv-toast, html.mode-wallpaper .tv-safe, html.mode-wallpaper .tv-before { display: none !important; }
+
+@media (prefers-reduced-motion: reduce) {
+  .tv-stage *, .tv-stage { transition: none !important; }
+}
+</style>
+
+<script type="application/json" id="tv-config">
+{
+  "title": "Living Room TV Home",
+  "subtitle": "A calmer home screen for a Google TV: favourites first, inputs one press away, no promoted rows.",
+  "sample": true,
+  "owner": "",
+  "greeting": "auto",
+  "preset": "ribbon",
+  "theme": "tungsten",
+  "accent": null,
+  "clock": "24h",
+  "wallpaper": { "mood": "horizon", "seed": 11 },
+  "device": { "model": "Sample Google TV", "resolution": "1920x1080" },
+  "generated": "",
+  "favorites": [
+    { "label": "YouTube", "color": "#E3261B", "glyph": "YT", "package": "com.google.android.youtube.tv", "note": "Subscriptions and Watch later", "actions": ["Home", "Subscriptions", "Search"] },
+    { "label": "Netflix", "color": "#B20710", "glyph": "N", "package": "com.netflix.ninja", "note": "Pick up where you left off", "actions": ["Continue watching", "My List", "Search"] },
+    { "label": "Prime Video", "color": "#1A98FF", "glyph": "PV", "package": "com.amazon.amazonvideo.livingroom", "note": "Watchlist and live sport", "actions": ["Watchlist", "Live", "Search"] },
+    { "label": "Spotify", "color": "#1DB954", "glyph": "S", "package": "com.spotify.tv.android", "note": "Evening playlists on the soundbar", "actions": ["Home", "Your Library", "Search"] },
+    { "label": "Plex", "color": "#E5A00D", "glyph": "PX", "package": "com.plexapp.android", "note": "Films from the home server", "actions": ["Movies", "TV Shows", "Search"] }
+  ],
+  "inputs": [
+    { "label": "HDMI 1", "name": "PlayStation 5", "note": "HDMI 1 · switch without opening the Inputs menu" },
+    { "label": "HDMI 2", "name": "Soundbar (ARC)" },
+    { "label": "HDMI 3", "name": "Laptop" }
+  ],
+  "apps": [
+    { "label": "YouTube Music", "color": "#C4302B", "glyph": "YM", "package": "com.google.android.youtube.tvmusic" },
+    { "label": "VLC", "color": "#F47216", "glyph": "VLC", "package": "org.videolan.vlc" },
+    { "label": "Files", "color": "#4F6B8A", "glyph": "F" },
+    { "label": "Play Store", "color": "#01875F", "glyph": "PL", "package": "com.android.vending" }
+  ],
+  "before": { "image": null, "caption": "", "issues": [] },
+  "changes": [
+    { "title": "Favourites in one row", "detail": "Five apps sit at the start of the first row, at most four presses from the first tile." },
+    { "title": "Inputs on the home screen", "detail": "HDMI 1 to 3 are tiles in the same row, so switching to the console skips the Inputs menu." },
+    { "title": "Nothing promoted", "detail": "The screen shows only your apps and inputs. There are no recommendation or sponsored rows." },
+    { "title": "Readable from the sofa", "detail": "Text is at least 24 px at 1080p and the layout keeps to the 5% title-safe margins." }
+  ]
+}
+</script>
+
+<div class="page">
+  <header class="page-head">
+    <div class="eyebrow">tvkit · home screen redesign</div>
+    <h1 id="pg-title">Living Room TV Home</h1>
+    <p id="pg-sub"></p>
+    <div class="chips" id="pg-chips"></div>
+    <p class="cfg-error" id="cfg-error" hidden></p>
+  </header>
+
+  <div class="main">
+    <div class="tv-col">
+      <div class="tv-bezel">
+        <div class="tv-wrap" id="tv" tabindex="0" role="group" aria-roledescription="TV screen" aria-label="TV home screen. Use the arrow keys to move and Enter to open.">
+          <div class="tv-stage" id="stage">
+            <canvas class="tv-wall" id="wall" width="1920" height="1080" aria-hidden="true"></canvas>
+            <div class="tv-scrim" id="scrim" aria-hidden="true"></div>
+            <div class="tv-ui" id="ui"></div>
+            <div class="tv-before" id="before" hidden>
+              <img id="before-img" alt="Screenshot of the current home screen">
+              <span class="tv-tag">Before</span>
+              <span class="tv-before-cap" id="before-cap"></span>
+            </div>
+            <div class="tv-safe" id="safe" hidden><span>Title-safe area · 5% margins</span></div>
+            <div class="tv-toast" id="toast" hidden></div>
+          </div>
+        </div>
+      </div>
+      <div class="legend" aria-label="Remote keys">
+        <span class="keys"><kbd>←</kbd><kbd>↑</kbd><kbd>↓</kbd><kbd>→</kbd><span>move</span></span>
+        <span class="keys"><kbd>Enter</kbd><span>open</span></span>
+        <button class="ck" type="button" id="ck-r" data-key="r"><i style="--k: var(--key-red)"></i>Before / after <kbd>R</kbd></button>
+        <button class="ck" type="button" id="ck-g" data-key="g"><i style="--k: var(--key-green)"></i>Layout <kbd>G</kbd></button>
+        <button class="ck" type="button" id="ck-y" data-key="y"><i style="--k: var(--key-yellow)"></i>Wallpaper <kbd>Y</kbd></button>
+        <button class="ck" type="button" id="ck-b" data-key="b"><i style="--k: var(--key-blue)"></i>Theme <kbd>B</kbd></button>
+      </div>
+      <p class="sr-only" id="live" aria-live="polite"></p>
+    </div>
+
+    <aside class="rail" aria-label="Design controls">
+      <section class="ctl">
+        <h2 class="ctl-title">Layout</h2>
+        <div class="seg">
+          <input type="radio" name="preset" id="preset-ribbon" value="ribbon"><label for="preset-ribbon">Ribbon</label>
+          <input type="radio" name="preset" id="preset-shelf" value="shelf"><label for="preset-shelf">Shelf</label>
+          <input type="radio" name="preset" id="preset-minimal" value="minimal"><label for="preset-minimal">Minimal</label>
+        </div>
+        <p class="ctl-hint" id="preset-hint"></p>
+      </section>
+      <section class="ctl">
+        <h2 class="ctl-title">View</h2>
+        <div class="seg">
+          <input type="radio" name="view" id="view-after" value="after" checked><label for="view-after">Redesign</label>
+          <input type="radio" name="view" id="view-before" value="before"><label for="view-before">Current</label>
+        </div>
+        <p class="ctl-hint" id="view-hint"></p>
+      </section>
+      <section class="ctl">
+        <h2 class="ctl-title">Theme</h2>
+        <div class="swatches" id="swatches"></div>
+      </section>
+      <section class="ctl">
+        <h2 class="ctl-title">Wallpaper</h2>
+        <select class="field" id="mood" aria-label="Wallpaper style"></select>
+        <button class="btn" type="button" id="export">Export wallpaper PNG</button>
+        <p class="ctl-hint">1920 × 1080, for Projectivy or FLauncher.</p>
+      </section>
+      <section class="ctl">
+        <label class="check" for="safe-toggle"><input type="checkbox" id="safe-toggle">Show title-safe area</label>
+      </section>
+    </aside>
+  </div>
+
+  <section class="notes" id="notes">
+    <div id="notes-after"><h2>What changes</h2><ol id="changes"></ol></div>
+    <div id="notes-before"><h2>On the current screen</h2><ol id="issues"></ol></div>
+  </section>
+
+  <footer class="page-foot">
+    <span>A mockup. Nothing on the TV changes until you apply it.</span>
+    <span>Made with the tvkit redesign skill for Claude Code</span>
+  </footer>
+</div>
+
+<div class="modal" id="modal" hidden role="dialog" aria-modal="true" aria-labelledby="modal-title">
+  <div class="modal-card">
+    <div class="modal-row"><h2 class="modal-title" id="modal-title">Wallpaper · 1920 × 1080</h2><button class="btn" type="button" id="modal-close">Close</button></div>
+    <img id="modal-img" alt="Exported wallpaper preview">
+    <div class="modal-row"><!-- local-only --><a class="btn" id="modal-save" download="tv-wallpaper.png" href="#">Save PNG</a><!-- /local-only --><span class="ctl-hint" id="modal-hint"></span></div>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var THEMES = {
+    tungsten: { name: 'Tungsten', base: '#0C1517', text: '#F5F0E6', muted: '#A9B5B2', accent: '#F2B54A', glow1: '#1D6B66', glow2: '#D9893A', glow3: '#23395E', mood: 'horizon' },
+    aurora:   { name: 'Aurora',   base: '#061217', text: '#EAF6F2', muted: '#9AB9B1', accent: '#74E8C9', glow1: '#0E8A73', glow2: '#2C64B4', glow3: '#6A49A8', mood: 'aurora' },
+    midnight: { name: 'Midnight', base: '#070A12', text: '#EEF1F8', muted: '#9AA4BA', accent: '#9DBBFF', glow1: '#1A2C5C', glow2: '#2E4C8F', glow3: '#10182F', mood: 'midnight' },
+    graphite: { name: 'Graphite', base: '#111314', text: '#F3F3F1', muted: '#A4A8AA', accent: '#FFFFFF', glow1: '#2B2F32', glow2: '#50565B', glow3: '#1B1D1F', mood: 'solid' },
+    coral:    { name: 'Coral',    base: '#170E12', text: '#FCF1EC', muted: '#C6ADA6', accent: '#FF8F6B', glow1: '#5E2234', glow2: '#E0664A', glow3: '#3A1940', mood: 'horizon' }
+  };
+  var MOODS = { horizon: 'Horizon', aurora: 'Aurora', midnight: 'Night sky', solid: 'Plain', photo: 'Your photo' };
+  var PRESETS = ['ribbon', 'shelf', 'minimal'];
+  var PRESET_HINTS = {
+    ribbon: 'Apps in one row along the bottom. The focused app takes over the screen above it.',
+    shelf: 'A large top shelf for the focused favourite, with an icon grid underneath.',
+    minimal: 'A big clock and your favourites as large labels. Nothing else on screen.'
+  };
+  var FALLBACK_COLORS = ['#3B6E8F', '#7A5C99', '#2F8F6B', '#B0603A', '#5A6B7A', '#8F3B5A', '#4C7A3A'];
+  var ICONS = {
+    search: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5 21 21"/></svg>',
+    settings: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h10M17 7h4M3 17h4M11 17h10"/><circle cx="15" cy="7" r="2.3"/><circle cx="9" cy="17" r="2.3"/></svg>',
+    hdmi: '<svg viewBox="0 0 48 24" aria-hidden="true"><path d="M3 4h42v9l-5 7H8l-5-7z"/><path d="M12 10h24"/></svg>'
+  };
+
+  var $ = function (id) { return document.getElementById(id); };
+  var stage = $('stage'), ui = $('ui'), wall = $('wall'), scrim = $('scrim'), tv = $('tv');
+
+  /* ---------- config ---------- */
+  var cfg = {}, cfgError = null;
+  try { cfg = JSON.parse(($('tv-config') || {}).textContent || '{}') || {}; } catch (e) { cfgError = e.message; cfg = {}; }
+  // Inside the tvkit Home launcher: every installed TV app the config doesn't list goes into "More apps",
+  // with the banner the TV itself uses, so nothing becomes unreachable when the stock launcher is off.
+  var appsMs = null;
+  if (window.TVKitHome && window.TVKitHome.apps) {
+    try {
+      var appsT0 = Date.now(), installed = JSON.parse(window.TVKitHome.apps()), known = {};
+      appsMs = Date.now() - appsT0;
+      ['favorites', 'apps', 'inputs'].forEach(function (k) {
+        (Array.isArray(cfg[k]) ? cfg[k] : []).forEach(function (it) { if (it && typeof it === 'object' && it['package']) known[it['package']] = it; });
+      });
+      if (!Array.isArray(cfg.apps)) cfg.apps = [];
+      installed.forEach(function (a) {
+        if (!a || !a['package']) return;
+        var it = known[a['package']];
+        if (it) { if (!it.logo && a.banner) it.logo = a.banner; return; }
+        cfg.apps.push({ label: a.label || a['package'], 'package': a['package'], logo: a.banner || '' });
+      });
+    } catch (e) { /* keep the configured apps only */ }
+  }
+  if (typeof cfg !== 'object' || Array.isArray(cfg)) cfg = {};
+
+  function str(v, d) { return (typeof v === 'string' && v.trim()) ? v.trim() : (d || ''); }
+  function isHex(c) { return typeof c === 'string' && /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(c.trim()); }
+  function slug(s) { return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'item'; }
+  function initials(label) {
+    var w = label.split(/\s+/).filter(Boolean);
+    if (!w.length) return '?';
+    return w.length === 1 ? w[0].charAt(0).toUpperCase() : (w[0].charAt(0) + w[1].charAt(0)).toUpperCase();
+  }
+  function normItems(list, prefix, kind) {
+    if (!Array.isArray(list)) return [];
+    var seen = {};
+    return list.filter(function (it) { return it && (typeof it === 'object' || typeof it === 'string'); }).map(function (it, i) {
+      if (typeof it === 'string') it = { label: it };
+      var label = str(it.label, str(it.name, 'Untitled'));
+      var base = prefix + '-' + slug(it.id || label), uid = base, n = 2;
+      while (seen[uid]) uid = base + '-' + (n++);
+      seen[uid] = 1;
+      var acts = Array.isArray(it.actions) ? it.actions.filter(function (a) { return typeof a === 'string' && a.trim(); }).slice(0, 4) : [];
+      return {
+        uid: uid, kind: kind, label: label, name: str(it.name),
+        color: isHex(it.color) ? it.color.trim() : FALLBACK_COLORS[i % FALLBACK_COLORS.length],
+        glyph: str(it.glyph, kind === 'input' ? label.replace(/[^0-9]/g, '') : initials(label)).slice(0, 3),
+        pkg: str(it['package']), note: str(it.note), actions: acts.length ? acts : null,
+        // Only embedded images are accepted, so the page never loads anything from the network.
+        logo: (typeof it.logo === 'string' && /^data:image\/(png|jpeg|webp|gif);base64,[A-Za-z0-9+\/=]+$/.test(it.logo)) ? it.logo : ''
+      };
+    });
+  }
+  var groups = [
+    { key: 'fav', title: 'Favourites', eyebrow: 'Favourite', items: normItems(cfg.favorites, 'fav', 'app') },
+    { key: 'in', title: 'Inputs', eyebrow: 'Input', items: normItems(cfg.inputs, 'in', 'input') },
+    { key: 'app', title: 'More apps', eyebrow: 'App', items: normItems(cfg.apps, 'app', 'app') }
+  ].filter(function (g) { return g.items.length; });
+  var byUid = {};
+  groups.forEach(function (g) { g.items.forEach(function (it, i) { it.group = g; it.index = i; byUid[it.uid] = it; }); });
+  function group(key) { return groups.filter(function (g) { return g.key === key; })[0] || null; }
+
+  var wp = cfg.wallpaper && typeof cfg.wallpaper === 'object' ? cfg.wallpaper : {};
+  var photo = null;
+  var startTheme = THEMES[cfg.theme] ? cfg.theme : 'tungsten';
+  var accentOverride = isHex(cfg.accent) ? cfg.accent.trim() : null;
+  var beforeImg = cfg.before && typeof cfg.before.image === 'string' && /^data:image\//.test(cfg.before.image) ? cfg.before.image : null;
+  var seed = isFinite(+wp.seed) ? (+wp.seed | 0) : 7;
+  if (typeof wp.image === 'string' && /^data:image\//.test(wp.image)) {
+    photo = new Image();
+    photo.onload = function () { paintWallpaper(); };
+    photo.src = wp.image;
+  }
+
+  var state = {
+    preset: PRESETS.indexOf(cfg.preset) >= 0 ? cfg.preset : 'ribbon',
+    view: 'after',
+    theme: startTheme,
+    mood: (MOODS[wp.mood] && (wp.mood !== 'photo' || photo)) ? wp.mood : (photo ? 'photo' : THEMES[startTheme].mood),
+    focusId: null, lastItemUid: null, rbX: 0, shY: 0, scale: 1, showAllApps: false, ready: false
+  };
+
+  /* ---------- colour helpers ---------- */
+  function hexToRgb(h) {
+    h = h.replace('#', '');
+    if (h.length === 3) h = h.split('').map(function (c) { return c + c; }).join('');
+    var n = parseInt(h, 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+  function rgbStr(h) { return hexToRgb(h).join(', '); }
+  function rgba(h, a) { return 'rgba(' + rgbStr(h) + ', ' + a + ')'; }
+  function mix(a, b, t) {
+    var x = hexToRgb(a), y = hexToRgb(b);
+    return '#' + x.map(function (v, i) { var m = Math.round(v + (y[i] - v) * t); return ('0' + m.toString(16)).slice(-2); }).join('');
+  }
+  function luminance(h) {
+    var c = hexToRgb(h).map(function (v) { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); });
+    return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+  }
+  function glyphColor(h) { return luminance(h) > 0.2 ? '#141414' : '#FFFFFF'; }
+
+  /* ---------- wallpaper painter (same code paints the screen and the export) ---------- */
+  function rng(a) {
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      var t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  var grainCache = {};
+  function grain(sd) {
+    if (grainCache[sd]) return grainCache[sd];
+    var c = document.createElement('canvas'); c.width = c.height = 160;
+    var x = c.getContext('2d'), d = x.createImageData(160, 160), r = rng(sd * 31 + 5);
+    for (var i = 0; i < d.data.length; i += 4) { var v = (r() * 255) | 0; d.data[i] = d.data[i + 1] = d.data[i + 2] = v; d.data[i + 3] = 255; }
+    x.putImageData(d, 0, 0);
+    return (grainCache[sd] = c);
+  }
+  function fillGlow(ctx, W, H, x, y, rad, color, a0) {
+    var g = ctx.createRadialGradient(x, y, 0, x, y, rad);
+    g.addColorStop(0, rgba(color, a0)); g.addColorStop(0.5, rgba(color, a0 * 0.33)); g.addColorStop(1, rgba(color, 0));
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  }
+  function paint(ctx, W, H) {
+    var t = THEMES[state.theme], r = rng(seed), mood = state.mood, i, g;
+    ctx.save();
+    ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+    ctx.fillStyle = t.base; ctx.fillRect(0, 0, W, H);
+    if (mood === 'photo' && photo && photo.complete && photo.naturalWidth) {
+      var s = Math.max(W / photo.naturalWidth, H / photo.naturalHeight), pw = photo.naturalWidth * s, ph = photo.naturalHeight * s;
+      ctx.drawImage(photo, (W - pw) / 2, (H - ph) / 2, pw, ph);
+      ctx.fillStyle = rgba(t.base, 0.28); ctx.fillRect(0, 0, W, H);
+    } else if (mood === 'aurora') {
+      ctx.globalCompositeOperation = 'screen';
+      var glows = [t.glow1, t.glow2, t.glow3];
+      for (i = 0; i < 6; i++) fillGlow(ctx, W, H, W * (0.05 + 0.9 * r()), H * (0.05 + 0.55 * r()), W * (0.22 + 0.28 * r()), glows[i % 3], 0.55);
+      for (i = 0; i < 70; i++) {
+        var cx = W * r(), cw = 6 + 60 * r(), top = H * (0.02 + 0.2 * r()), len = H * (0.35 + 0.35 * r());
+        g = ctx.createLinearGradient(0, top, 0, top + len);
+        var cc = glows[i % 2];
+        g.addColorStop(0, rgba(cc, 0)); g.addColorStop(0.35, rgba(cc, 0.05 + 0.07 * r())); g.addColorStop(1, rgba(cc, 0));
+        ctx.fillStyle = g; ctx.fillRect(cx, top, cw, len);
+      }
+    } else if (mood === 'horizon') {
+      g = ctx.createLinearGradient(0, 0, 0, H);
+      g.addColorStop(0, t.base); g.addColorStop(0.42, mix(t.base, t.glow3, 0.6)); g.addColorStop(0.64, mix(t.base, t.glow2, 0.62)); g.addColorStop(1, mix(t.base, t.glow1, 0.3));
+      ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+      var sx = W * 0.7, sy = H * 0.64;
+      ctx.globalCompositeOperation = 'screen';
+      fillGlow(ctx, W, H, sx, sy, H * 0.75, t.glow2, 0.5);
+      g = ctx.createRadialGradient(sx, sy, 0, sx, sy, H * 0.09);
+      g.addColorStop(0, rgba(mix(t.glow2, '#ffffff', 0.6), 0.95)); g.addColorStop(1, rgba(t.glow2, 0));
+      ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+      ctx.globalCompositeOperation = 'source-over';
+      for (var L = 0; L < 3; L++) {
+        var base = H * (0.66 + L * 0.09), amp = H * (0.05 - L * 0.012), f1 = 1.5 + r() * 2, f2 = 3 + r() * 4, phs = r() * 6.28;
+        ctx.beginPath(); ctx.moveTo(0, H);
+        for (var x = 0; x <= W; x += 16) {
+          ctx.lineTo(x, base - amp * (0.6 * Math.sin(x / W * f1 * Math.PI + phs) + 0.4 * Math.sin(x / W * f2 * Math.PI + phs * 2)));
+        }
+        ctx.lineTo(W, H); ctx.closePath();
+        ctx.fillStyle = mix(t.base, t.glow1, 0.32 - L * 0.12); ctx.fill();
+      }
+    } else if (mood === 'midnight') {
+      fillGlow(ctx, W, H, W * 0.78, H * 0.12, W * 0.6, t.glow2, 0.5);
+      g = ctx.createLinearGradient(0, H * 0.55, 0, H);
+      g.addColorStop(0, rgba(t.glow1, 0)); g.addColorStop(1, rgba(t.glow1, 0.45));
+      ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+      for (i = 0; i < 420; i++) {
+        var px = W * r(), py = H * r() * 0.8, pr = r() < 0.92 ? 1.2 : 2.4;
+        ctx.fillStyle = 'rgba(255, 255, 255, ' + (0.15 + 0.6 * r()).toFixed(3) + ')';
+        ctx.beginPath(); ctx.arc(px, py, pr, 0, 6.2832); ctx.fill();
+      }
+    } else {
+      fillGlow(ctx, W, H, W * 0.5, H * 0.1, W * 0.8, t.glow2, 0.35);
+    }
+    ctx.globalCompositeOperation = 'source-over';
+    g = ctx.createRadialGradient(W / 2, H * 0.45, H * 0.35, W / 2, H * 0.5, W * 0.78);
+    g.addColorStop(0, 'rgba(0, 0, 0, 0)'); g.addColorStop(1, 'rgba(0, 0, 0, 0.42)');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    ctx.globalAlpha = 0.05; ctx.fillStyle = ctx.createPattern(grain(seed), 'repeat'); ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+  }
+  function paintWallpaper() { paint(wall.getContext('2d'), 1920, 1080); }
+
+  /* ---------- theme ---------- */
+  function applyTheme() {
+    var t = THEMES[state.theme], acc = (accentOverride && state.theme === startTheme) ? accentOverride : t.accent, s = stage.style;
+    s.setProperty('--tv-base', t.base); s.setProperty('--tv-base-rgb', rgbStr(t.base));
+    s.setProperty('--tv-text', t.text); s.setProperty('--tv-text-rgb', rgbStr(t.text));
+    s.setProperty('--tv-muted', t.muted); s.setProperty('--tv-accent', acc);
+    s.setProperty('--tv-accent-glow', rgba(acc, 0.55)); s.setProperty('--tv-glass', rgba(t.text, 0.13));
+    paintWallpaper();
+    if (state.lastItemUid && byUid[state.lastItemUid]) updateHeroArt(byUid[state.lastItemUid]);
+  }
+  function applyScrim() {
+    var b = 'rgba(var(--tv-base-rgb), ';
+    var map = {
+      ribbon: 'linear-gradient(180deg, ' + b + '.6) 0, ' + b + '0) 220px), linear-gradient(0deg, ' + b + '.94) 0, ' + b + '.55) 300px, ' + b + '0) 560px), linear-gradient(90deg, ' + b + '.72) 0, ' + b + '0) 1150px)',
+      shelf: 'linear-gradient(180deg, ' + b + '.7) 0, ' + b + '0) 200px), linear-gradient(0deg, ' + b + '.97) 0, ' + b + '.92) 430px, ' + b + '.25) 560px, ' + b + '0) 700px)',
+      minimal: 'radial-gradient(1400px 900px at 30% 30%, ' + b + '0), ' + b + '.55)), linear-gradient(0deg, ' + b + '.8) 0, ' + b + '0) 460px)'
+    };
+    scrim.style.background = map[state.preset];
+  }
+
+  /* ---------- clock and greeting ---------- */
+  function greetingText() {
+    var custom = str(cfg.greeting);
+    if (custom && custom !== 'auto') return custom;
+    var h = new Date().getHours(), g = h >= 5 && h < 12 ? 'Good morning' : (h >= 12 && h < 17 ? 'Good afternoon' : 'Good evening');
+    var who = str(cfg.owner);
+    return who ? g + ', ' + who : g;
+  }
+  function clockText() {
+    var d = new Date(), h = d.getHours(), m = ('0' + d.getMinutes()).slice(-2);
+    if (cfg.clock === '12h') return (h % 12 || 12) + ':' + m + (h < 12 ? ' AM' : ' PM');
+    return ('0' + h).slice(-2) + ':' + m;
+  }
+  function dateText() {
+    try { return new Date().toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' }); }
+    catch (e) { return new Date().toDateString(); }
+  }
+  function tick() {
+    var g = $('tv-greet'), d = $('tv-date'), c = $('tv-clock'), mt = $('mn-time'), ms = $('mn-sub');
+    if (g) g.textContent = greetingText();
+    if (d) d.textContent = dateText();
+    if (c) c.textContent = clockText();
+    if (mt) mt.textContent = clockText();
+    if (ms) ms.textContent = dateText() + ' · ' + greetingText();
+  }
+
+  /* ---------- DOM building ---------- */
+  function el(tag, attrs, kids) {
+    var n = document.createElement(tag);
+    if (attrs) Object.keys(attrs).forEach(function (k) {
+      var v = attrs[k];
+      if (v == null || v === false) return;
+      if (k === 'class') n.className = v;
+      else if (k === 'text') n.textContent = v;
+      else if (k === 'html') n.innerHTML = v;
+      else n.setAttribute(k, v === true ? '' : v);
+    });
+    (kids || []).forEach(function (c) { if (c != null) n.appendChild(typeof c === 'string' ? document.createTextNode(c) : c); });
+    return n;
+  }
+  function ariaFor(item) { return item.kind === 'input' ? item.label + (item.name ? ', ' + item.name : '') : item.label; }
+  function eyebrowFor(item) { return item.group.eyebrow + ' · ' + (item.index + 1) + ' of ' + item.group.items.length; }
+  function navAttrs(item, cls) {
+    return { 'class': cls, type: 'button', tabindex: '-1', 'data-nav': true, 'data-kind': item.kind, 'data-uid': item.uid, id: 'nav-' + item.uid, 'aria-label': ariaFor(item) };
+  }
+  function sysBtn(kind, label) {
+    return el('button', { 'class': 'tv-icon', type: 'button', tabindex: '-1', 'data-nav': true, 'data-kind': 'system', 'data-label': label, id: 'nav-sys-' + kind, 'aria-label': label, html: ICONS[kind] });
+  }
+  function topBar() {
+    return el('div', { 'class': 'tv-top' }, [
+      el('div', null, [el('div', { 'class': 'tv-greet', id: 'tv-greet' }), el('div', { 'class': 'tv-date', id: 'tv-date' })]),
+      el('div', { 'class': 'tv-top-right' }, [sysBtn('search', 'Search'), sysBtn('settings', 'Settings'), el('div', { 'class': 'tv-clock', id: 'tv-clock' })])
+    ]);
+  }
+  function tile(item) {
+    var isInput = item.kind === 'input', b = el('button', navAttrs(item, 'tile' + (isInput ? ' tile-input' : '')));
+    if (isInput) {
+      var g = el('span', { 'class': 'tile-glyph', html: ICONS.hdmi });
+      g.appendChild(el('span', { text: item.label }));
+      b.appendChild(g);
+    } else if (item.logo) {
+      b.classList.add('tile-has-logo');
+      b.style.setProperty('--tile-bg', '#111 center / cover no-repeat url("' + item.logo + '")');
+    } else {
+      b.style.setProperty('--tile-bg', 'linear-gradient(150deg, ' + mix(item.color, '#ffffff', 0.16) + ' 0%, ' + item.color + ' 55%, ' + mix(item.color, '#000000', 0.24) + ' 100%)');
+      b.style.setProperty('--glyph', glyphColor(item.color));
+      b.appendChild(el('span', { 'class': 'tile-glyph', text: item.glyph }));
+    }
+    b.appendChild(el('span', { 'class': 'tile-label', text: isInput ? (item.name || item.label) : item.label }));
+    return b;
+  }
+  function pill(item, small) {
+    var b = el('button', navAttrs(item, 'pill' + (small ? ' sm' : '')));
+    if (item.kind === 'input') b.appendChild(el('span', { 'class': 'pill-icon', html: ICONS.hdmi }));
+    else { var d = el('span', { 'class': 'pill-dot' }); d.style.setProperty('--c', item.color); b.appendChild(d); }
+    b.appendChild(document.createTextNode(item.kind === 'input' ? (item.name ? item.label + ' · ' + item.name : item.label) : item.label));
+    return b;
+  }
+
+  function heroTitle(item) { return item.kind === 'input' ? (item.name || item.label) : item.label; }
+  function heroNote(item) { return item.note || (item.kind === 'input' && item.name ? item.label : ''); }
+  function defaultActions(item) { return item.kind === 'input' ? ['Switch to ' + item.label, 'Rename input'] : ['Open', 'Search', 'App info']; }
+  function updateHeroArt(item) {
+    var t = THEMES[state.theme], glyph = $('sh-glyph');
+    stage.style.setProperty('--hero-a', rgba(item.kind === 'input' ? t.glow2 : item.color, 0.62));
+    if (glyph) { glyph.textContent = item.logo ? '' : item.glyph; glyph.style.color = mix(item.kind === 'input' ? t.text : item.color, '#ffffff', 0.18); }
+  }
+  function updateHero(item) {
+    var hero = $('hero');
+    updateHeroArt(item);
+    if (!hero) return;
+    hero.textContent = '';
+    hero.appendChild(el('div', { 'class': 'eyebrow-tv', text: eyebrowFor(item) }));
+    hero.appendChild(el('h2', { 'class': hero.getAttribute('data-title-class'), text: heroTitle(item) }));
+    var note = heroNote(item);
+    if (note) hero.appendChild(el('p', { 'class': hero.getAttribute('data-note-class'), text: note }));
+    var acts = el('div', { 'class': 'hero-actions' });
+    (item.actions || defaultActions(item)).forEach(function (a, i) {
+      acts.appendChild(el('button', { 'class': 'chip', type: 'button', tabindex: '-1', 'data-nav': true, 'data-kind': 'action', 'data-uid': item.uid, 'data-action': a, id: 'nav-act-' + i, text: a }));
+    });
+    hero.appendChild(acts);
+  }
+
+  function renderRibbon() {
+    var track = el('div', { 'class': 'rb-track', id: 'rb-track' });
+    groups.forEach(function (g, gi) {
+      if (gi) track.appendChild(el('span', { 'class': 'rb-sep', 'aria-hidden': 'true' }));
+      g.items.forEach(function (it) { track.appendChild(tile(it)); });
+    });
+    ui.appendChild(topBar());
+    ui.appendChild(el('div', { 'class': 'rb-hero', id: 'hero', 'data-title-class': 'rb-title', 'data-note-class': 'rb-note' }));
+    ui.appendChild(el('div', { 'class': 'rb-viewport' }, [track]));
+  }
+  function renderShelf() {
+    var grid = el('div', { 'class': 'sh-grid' });
+    groups.forEach(function (g) {
+      var tiles = el('div', { 'class': 'sh-tiles' });
+      g.items.forEach(function (it) { tiles.appendChild(tile(it)); });
+      grid.appendChild(el('div', { 'class': 'sh-row' }, [el('h3', { 'class': 'sh-row-title', text: g.title }), tiles]));
+    });
+    var hero = el('div', { 'class': 'sh-hero' }, [
+      el('div', { 'class': 'sh-art', id: 'sh-art' }),
+      el('div', { 'class': 'sh-glyph', id: 'sh-glyph', 'aria-hidden': 'true' }),
+      el('div', { 'class': 'sh-copy', id: 'hero', 'data-title-class': 'sh-title', 'data-note-class': 'sh-note' })
+    ]);
+    ui.appendChild(el('div', { 'class': 'sh-scroll', id: 'sh-scroll' }, [hero, grid]));
+    ui.appendChild(topBar());
+  }
+  function renderMinimal() {
+    var fav = group('fav'), inputs = group('in'), apps = group('app'), bottom = el('div', { 'class': 'mn-bottom' }), row;
+    var first = fav || apps;
+    if (first) {
+      bottom.appendChild(el('div', { 'class': 'mn-label', text: first.title }));
+      row = el('div', { 'class': 'mn-pills' });
+      first.items.forEach(function (it) { row.appendChild(pill(it)); });
+      if (fav && apps) row.appendChild(el('button', { 'class': 'pill', type: 'button', tabindex: '-1', 'data-nav': true, 'data-kind': 'more', id: 'nav-more', text: state.showAllApps ? 'Fewer apps' : 'All apps' }));
+      bottom.appendChild(row);
+    }
+    if (fav && apps && state.showAllApps) {
+      bottom.appendChild(el('div', { 'class': 'mn-label', text: apps.title }));
+      row = el('div', { 'class': 'mn-pills' });
+      apps.items.forEach(function (it) { row.appendChild(pill(it, true)); });
+      bottom.appendChild(row);
+    }
+    if (inputs) {
+      bottom.appendChild(el('div', { 'class': 'mn-label', text: inputs.title }));
+      row = el('div', { 'class': 'mn-pills' });
+      inputs.items.forEach(function (it) { row.appendChild(pill(it, true)); });
+      bottom.appendChild(row);
+    }
+    ui.appendChild(el('div', { 'class': 'mn' }, [el('div', null, [el('div', { 'class': 'mn-time', id: 'mn-time' }), el('div', { 'class': 'mn-sub', id: 'mn-sub' })]), bottom]));
+    ui.appendChild(el('div', { 'class': 'mn-icons' }, [sysBtn('search', 'Search'), sysBtn('settings', 'Settings')]));
+  }
+  function render() {
+    var keep = state.lastItemUid;
+    ui.textContent = '';
+    ui.className = 'tv-ui';
+    state.rbX = 0; state.shY = 0; state.lastItemUid = null; state.focusId = null;
+    if (!groups.length) { ui.appendChild(topBar()); ui.appendChild(el('p', { 'class': 'tv-empty', text: 'No apps in this config yet.' })); }
+    else if (state.preset === 'ribbon') renderRibbon();
+    else if (state.preset === 'shelf') renderShelf();
+    else renderMinimal();
+    applyScrim(); tick();
+    var target = (keep && $('nav-' + keep)) || ui.querySelector('[data-uid]') || ui.querySelector('[data-nav]');
+    if (target) focusEl(target, { instant: true, silent: true });
+  }
+
+  /* ---------- focus and remote navigation ---------- */
+  function setTransform(node, v, instant) {
+    if (instant) { node.style.transition = 'none'; node.style.transform = v; void node.offsetWidth; node.style.transition = ''; }
+    else node.style.transform = v;
+  }
+  function offsetWithin(n, ancestor) {
+    var top = 0, cur = n;
+    while (cur && cur !== ancestor) { top += cur.offsetTop; cur = cur.offsetParent; }
+    return top;
+  }
+  function ensureVisible(n, instant) {
+    if (state.preset === 'ribbon') {
+      var track = $('rb-track');
+      if (!track || !track.contains(n)) return;
+      var vw = 1920, pad = 150, x = state.rbX, L = n.offsetLeft, R = L + n.offsetWidth;
+      if (L + x < pad) x = pad - L; else if (R + x > vw - pad) x = vw - pad - R;
+      x = Math.max(Math.min(0, vw - track.scrollWidth), Math.min(0, x));
+      state.rbX = x; setTransform(track, 'translateX(' + x + 'px)', instant);
+    } else if (state.preset === 'shelf') {
+      var sc = $('sh-scroll');
+      if (!sc) return;
+      var y = 0, row = n.closest('.sh-row');
+      if (row && row !== sc.querySelector('.sh-row')) y = Math.min(0, 1030 - (offsetWithin(n, sc) + n.offsetHeight + 60));
+      state.shY = y; setTransform(sc, 'translateY(' + y + 'px)', instant);
+    }
+  }
+  function announce(n) {
+    var uid = n.getAttribute('data-uid'), item = uid && byUid[uid], kind = n.getAttribute('data-kind');
+    $('live').textContent = item && kind !== 'action' ? ariaFor(item) + ', ' + eyebrowFor(item) : (n.getAttribute('aria-label') || n.textContent);
+  }
+  function focusEl(n, opts) {
+    if (!n) return;
+    opts = opts || {};
+    var prev = ui.querySelector('.is-focus');
+    if (prev && prev !== n) prev.classList.remove('is-focus');
+    n.classList.add('is-focus'); ui.classList.add('has-focus');
+    state.focusId = n.id; tv.setAttribute('aria-activedescendant', n.id);
+    var uid = n.getAttribute('data-uid'), kind = n.getAttribute('data-kind');
+    if (uid && kind !== 'action' && byUid[uid] && state.lastItemUid !== uid) { state.lastItemUid = uid; updateHero(byUid[uid]); }
+    if (!opts.noScroll) ensureVisible(n, opts.instant);
+    if (!opts.silent) announce(n);
+  }
+  function rectOf(n) {
+    var s = stage.getBoundingClientRect(), b = n.getBoundingClientRect(), k = state.scale || 1;
+    var l = (b.left - s.left) / k, t = (b.top - s.top) / k, w = b.width / k, h = b.height / k;
+    return { l: l, t: t, r: l + w, b: t + h, cx: l + w / 2, cy: t + h / 2 };
+  }
+  function move(dir) {
+    var cur = state.focusId && $(state.focusId);
+    var all = Array.prototype.slice.call(ui.querySelectorAll('[data-nav]'));
+    if (!all.length) return;
+    if (!cur || !ui.contains(cur)) { focusEl(all[0]); return; }
+    var r = rectOf(cur), best = null, bestD = Infinity;
+    var cands = all.filter(function (n) { return n !== cur; }).map(function (n) { return { n: n, b: rectOf(n) }; });
+    if (dir === 'left' || dir === 'right') {
+      var sgn = dir === 'right' ? 1 : -1;
+      cands.forEach(function (c) {
+        var dx = (c.b.cx - r.cx) * sgn;
+        if (dx <= 4) return;
+        var overlap = Math.min(r.b, c.b.b) - Math.max(r.t, c.b.t);
+        if (overlap < 0.35 * Math.min(r.b - r.t, c.b.b - c.b.t)) return;
+        if (dx < bestD) { bestD = dx; best = c.n; }
+      });
+    } else {
+      var sg = dir === 'down' ? 1 : -1, minDy = Infinity;
+      cands = cands.filter(function (c) { c.dy = (c.b.cy - r.cy) * sg; return c.dy > 12; });
+      cands.forEach(function (c) { if (c.dy < minDy) minDy = c.dy; });
+      var band = cands.filter(function (c) { return c.dy <= minDy + 48; });
+      var kind = cur.getAttribute('data-kind');
+      if ((kind === 'action' || kind === 'system') && state.lastItemUid) {
+        var last = $('nav-' + state.lastItemUid);
+        if (last && band.some(function (c) { return c.n === last; })) best = last;
+      }
+      if (!best) band.forEach(function (c) { var dx = Math.abs(c.b.cx - r.cx); if (dx < bestD) { bestD = dx; best = c.n; } });
+    }
+    if (best) focusEl(best);
+  }
+
+  var toastTimer = null;
+  function toast(title, sub) {
+    var t = $('toast');
+    t.textContent = '';
+    t.appendChild(el('span', { text: title }));
+    if (sub) t.appendChild(el('small', { text: sub }));
+    t.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { t.hidden = true; }, 1700);
+  }
+  // Present only when this page runs as the real home screen inside the tvkit Home launcher app.
+  var home = window.TVKitHome || null;
+  function openForReal(item) {
+    if (item.kind === 'input' && !item.pkg) return home.openInput(item.label);
+    return item.pkg ? home.launch(item.pkg) : false;
+  }
+  function activate(n) {
+    var kind = n.getAttribute('data-kind'), uid = n.getAttribute('data-uid'), item = uid && byUid[uid];
+    if (kind === 'more') {
+      state.showAllApps = !state.showAllApps; render();
+      var more = $('nav-more'); if (more) focusEl(more, { instant: true });
+      return;
+    }
+    if (kind === 'system') {
+      if (home) { if (n.getAttribute('data-label') === 'Settings') home.openSettings(); else home.search(); return; }
+      toast(n.getAttribute('data-label'), 'opens the system screen'); return;
+    }
+    if (!item) return;
+    if (home) { if (!openForReal(item)) toast("Can't open " + item.label, item.pkg || item.name || ''); return; }
+    if (kind === 'action') { toast(n.getAttribute('data-action'), item.label); return; }
+    if (item.kind === 'input') toast('Switching to ' + item.label, item.name || 'HDMI input');
+    else toast('Opening ' + item.label, item.pkg || '');
+  }
+
+  /* ---------- views, presets, themes ---------- */
+  function syncHash() {
+    if (!state.ready || document.documentElement.classList.contains('mode-screen')) return;
+    try { history.replaceState(null, '', '#' + (state.view === 'before' ? 'before' : state.preset)); } catch (e) { /* ignore */ }
+  }
+  function setView(v) {
+    if (v === 'before' && !beforeImg) { toast('No screenshot yet', 'run the redesign skill with your TV connected'); v = 'after'; }
+    state.view = v;
+    $('before').hidden = v !== 'before';
+    $('view-' + v).checked = true;
+    syncHash();
+  }
+  function syncPresetControls() { $('preset-' + state.preset).checked = true; $('preset-hint').textContent = PRESET_HINTS[state.preset]; }
+  function setPreset(p) {
+    if (PRESETS.indexOf(p) < 0) return;
+    state.preset = p; syncPresetControls(); render(); syncHash();
+  }
+  function syncSwatches() {
+    Object.keys(THEMES).forEach(function (k) { var b = $('theme-' + k); if (b) b.setAttribute('aria-pressed', String(k === state.theme)); });
+  }
+  function setTheme(k) {
+    if (!THEMES[k]) return;
+    var wasDefault = state.mood === THEMES[state.theme].mood;
+    state.theme = k;
+    if (wasDefault) state.mood = THEMES[k].mood;
+    $('mood').value = state.mood;
+    applyTheme(); syncSwatches();
+  }
+  function setMood(m) {
+    if (!MOODS[m] || (m === 'photo' && !photo)) return;
+    state.mood = m; $('mood').value = m; paintWallpaper();
+  }
+  function nextMood() {
+    var ks = Object.keys(MOODS).filter(function (k) { return k !== 'photo' || photo; });
+    setMood(ks[(ks.indexOf(state.mood) + 1) % ks.length]);
+    toast('Wallpaper: ' + MOODS[state.mood]);
+  }
+  function colorKey(k) {
+    if (k === 'r') setView(state.view === 'before' ? 'after' : 'before');
+    else if (k === 'g') setPreset(PRESETS[(PRESETS.indexOf(state.preset) + 1) % PRESETS.length]);
+    else if (k === 'y') nextMood();
+    else if (k === 'b') { var ks = Object.keys(THEMES); setTheme(ks[(ks.indexOf(state.theme) + 1) % ks.length]); }
+  }
+
+  function openExport() {
+    var c = document.createElement('canvas'), url = '';
+    c.width = 1920; c.height = 1080; paint(c.getContext('2d'), 1920, 1080);
+    try { url = c.toDataURL('image/png'); } catch (e) { url = ''; }
+    var framed = true;
+    try { framed = window.self !== window.top; } catch (e) { framed = true; }
+    var save = $('modal-save'), canSave = !!save && !framed && !!url;
+    $('modal-img').src = url;
+    if (save) { save.href = url || '#'; save.hidden = !canSave; }
+    $('modal-hint').textContent = canSave
+      ? 'Saves tv-wallpaper.png. Send it to the TV with tvkit push-wallpaper.'
+      : 'Right-click the image and choose Save Image As, or use the wallpaper PNG the tvkit build script saved next to this page.';
+    $('modal').hidden = false;
+    $('modal-close').focus();
+  }
+  function closeModal() { $('modal').hidden = true; tv.focus({ preventScroll: true }); }
+
+  function readHash() {
+    var h = (location.hash || '').replace(/^#/, ''), root = document.documentElement;
+    root.classList.remove('mode-screen', 'mode-wallpaper');
+    if (h === 'wallpaper') root.classList.add('mode-screen', 'mode-wallpaper');
+    else if (h === 'launcher') { root.classList.add('mode-screen', 'mode-launcher'); state.view = 'after'; }
+    else if (/^screen-(ribbon|shelf|minimal)$/.test(h)) { root.classList.add('mode-screen'); state.preset = h.slice(7); state.view = 'after'; }
+    else if (h === 'screen-before' && beforeImg) { root.classList.add('mode-screen'); state.view = 'before'; }
+    else if (PRESETS.indexOf(h) >= 0) { state.preset = h; state.view = 'after'; }
+    else if (h === 'before' && beforeImg) state.view = 'before';
+  }
+  function fit() {
+    var w = tv.clientWidth || 1920;
+    state.scale = w / 1920;
+    stage.style.transform = 'scale(' + state.scale + ')';
+  }
+
+  /* ---------- page chrome ---------- */
+  function fillList(ol, arr) {
+    ol.textContent = '';
+    arr.forEach(function (x) {
+      if (typeof x === 'string') x = { title: x };
+      if (!x || !str(x.title)) return;
+      var li = el('li', null, [el('strong', { text: x.title })]);
+      if (str(x.detail)) li.appendChild(el('span', { text: x.detail }));
+      ol.appendChild(li);
+    });
+    return ol.children.length;
+  }
+  function fillPage() {
+    $('pg-title').textContent = str(cfg.title, 'TV Home');
+    var sub = str(cfg.subtitle);
+    $('pg-sub').textContent = sub; $('pg-sub').hidden = !sub;
+    var chips = $('pg-chips'), dev = cfg.device && typeof cfg.device === 'object' ? cfg.device : {};
+    chips.textContent = '';
+    if (cfg.sample) chips.appendChild(el('span', { 'class': 'chip-pg is-sample', text: 'Sample data' }));
+    if (str(dev.model)) chips.appendChild(el('span', { 'class': 'chip-pg', text: dev.model }));
+    if (str(dev.resolution)) chips.appendChild(el('span', { 'class': 'chip-pg', text: dev.resolution }));
+    if (str(cfg.generated)) chips.appendChild(el('span', { 'class': 'chip-pg', text: 'Made ' + cfg.generated }));
+    var nCh = fillList($('changes'), Array.isArray(cfg.changes) ? cfg.changes : []);
+    var nIs = fillList($('issues'), cfg.before && Array.isArray(cfg.before.issues) ? cfg.before.issues : []);
+    $('notes-after').hidden = !nCh; $('notes-before').hidden = !nIs; $('notes').hidden = !nCh && !nIs;
+    if (beforeImg) $('before-img').src = beforeImg;
+    $('before-cap').textContent = str(cfg.before && cfg.before.caption, 'Your current home screen');
+    $('view-before').disabled = !beforeImg;
+    $('view-hint').textContent = beforeImg ? 'Compare with a screenshot of the home screen you have today.' : 'No screenshot of the current screen in this file.';
+    if (cfgError) { $('cfg-error').textContent = 'The tv-config block is not valid JSON (' + cfgError + '). Fix it and reload.'; $('cfg-error').hidden = false; }
+  }
+  function buildControls() {
+    var box = $('swatches');
+    box.textContent = '';
+    Object.keys(THEMES).forEach(function (k) {
+      var t = THEMES[k], dots = el('span', { 'class': 'sw-dots', 'aria-hidden': 'true' });
+      [t.base, t.glow1, t.accent].forEach(function (c) { var i = el('i'); i.style.background = c; dots.appendChild(i); });
+      var b = el('button', { 'class': 'sw', type: 'button', id: 'theme-' + k, 'aria-pressed': 'false' }, [dots, t.name]);
+      b.addEventListener('click', function () { setTheme(k); });
+      box.appendChild(b);
+    });
+    var sel = $('mood');
+    sel.textContent = '';
+    Object.keys(MOODS).forEach(function (k) { if (k !== 'photo' || photo) sel.appendChild(el('option', { value: k, text: MOODS[k] })); });
+    sel.value = state.mood;
+    sel.addEventListener('change', function () { setMood(sel.value); });
+    Array.prototype.forEach.call(document.querySelectorAll('input[name="preset"]'), function (r) { r.addEventListener('change', function () { if (r.checked) setPreset(r.value); }); });
+    Array.prototype.forEach.call(document.querySelectorAll('input[name="view"]'), function (r) { r.addEventListener('change', function () { if (r.checked) setView(r.value); }); });
+    Array.prototype.forEach.call(document.querySelectorAll('.ck'), function (b) { b.addEventListener('click', function () { colorKey(b.getAttribute('data-key')); }); });
+    $('safe-toggle').addEventListener('change', function (e) { $('safe').hidden = !e.target.checked; });
+    $('export').addEventListener('click', openExport);
+    $('modal-close').addEventListener('click', closeModal);
+    $('modal').addEventListener('click', function (e) { if (e.target === $('modal')) closeModal(); });
+    syncSwatches();
+  }
+
+  /* ---------- input ---------- */
+  function typing(t) {
+    if (!t) return false;
+    var tag = t.tagName;
+    return (tag === 'INPUT' && t.type !== 'radio' && t.type !== 'checkbox') || tag === 'TEXTAREA' || tag === 'SELECT' || t.isContentEditable;
+  }
+  window.addEventListener('keydown', function (e) {
+    if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (!$('modal').hidden) { if (e.key === 'Escape') { closeModal(); e.preventDefault(); } return; }
+    var a = document.activeElement, k = e.key;
+    if (k.length === 1 && 'rgyb'.indexOf(k.toLowerCase()) >= 0 && !typing(a)) { colorKey(k.toLowerCase()); e.preventDefault(); return; }
+    var onPage = a && a !== document.body && a !== tv && !tv.contains(a);
+    if (onPage) return;
+    if (state.view === 'before') { if (k === 'Escape') { setView('after'); e.preventDefault(); } return; }
+    var dir = { ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down' }[k];
+    if (dir) { move(dir); e.preventDefault(); return; }
+    if (k === 'Enter' || k === ' ') { var cur = state.focusId && $(state.focusId); if (cur) activate(cur); e.preventDefault(); }
+  });
+  ui.addEventListener('pointermove', function (e) {
+    if (e.pointerType !== 'mouse') return;
+    var n = e.target.closest && e.target.closest('[data-nav]');
+    if (n && ui.contains(n) && n.id !== state.focusId) focusEl(n, { noScroll: true });
+  });
+  ui.addEventListener('click', function (e) {
+    var n = e.target.closest && e.target.closest('[data-nav]');
+    if (!n || !ui.contains(n)) return;
+    if (n.id !== state.focusId) { focusEl(n); if (e.pointerType && e.pointerType !== 'mouse') return; }
+    activate(n);
+  });
+  tv.addEventListener('pointerdown', function () {
+    if (document.activeElement !== tv && !tv.contains(document.activeElement)) tv.focus({ preventScroll: true });
+  });
+  window.addEventListener('hashchange', function () { readHash(); syncPresetControls(); fit(); render(); setView(state.view); });
+
+  /* ---------- start ---------- */
+  fillPage();
+  buildControls();
+  readHash();
+  syncPresetControls();
+  fit();
+  applyTheme();
+  render();
+  setView(state.view);
+  if (window.ResizeObserver) new ResizeObserver(fit).observe(tv); else window.addEventListener('resize', fit);
+  setInterval(tick, 10000);
+  // Called by the tvkit Home app when Home or Back is pressed: back to the first app, like a stock launcher.
+  window.tvkitHome = function () {
+    if (state.view !== 'after') setView('after');
+    var g = group('fav') || groups[0], it = g && g.items[0], first = it && $('nav-' + it.uid);
+    if (first) focusEl(first, {});
+  };
+  state.ready = true;
+  // Inside tvkit Home this reaches logcat (adb logcat -s tvkitHome) once the first screen is painted.
+  if (window.TVKitHome) requestAnimationFrame(function () { requestAnimationFrame(function () {
+    console.log('ready: first screen painted ' + Math.round(performance.now()) + ' ms after page start; apps() took ' + appsMs + ' ms');
+  }); });
+})();
+</script>
