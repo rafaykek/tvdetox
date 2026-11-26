@@ -8,6 +8,10 @@ tvdetox ships **tvkit**, a Claude Code plugin for TCL and other Android TV / Goo
 
 > Built and tested on a TCL Android TV (Android 9, 2 GB RAM). No root, no firmware changes, nothing uninstalled.
 
+![tvkit in a terminal: it plans a debloat, waits for --yes, disables two ad packages with a snapshot, refuses a package known to break the Inputs button, undoes the batch exactly, and the guard hook blocks a raw adb uninstall](docs/images/tvkit-demo.png)
+
+<sub>Real output from tvkit and the guard hook, run against the fake TCL TV in [`tests/`](tests/). Repeated lines are trimmed and marked with "…".</sub>
+
 ## Why another TV debloater?
 
 In October 2026 a TCL Google TV owner handed the remote to Claude Code. They disabled 25 preinstalled apps and built a new launcher in an afternoon. Open-source prompts like CleanYourTV took off soon after. Two things went wrong along the way:
@@ -58,6 +62,8 @@ tvkit undo                        # back to the stock home
 Why `swap`: the stock launcher registers for Home at intent priority 2, and installed apps are capped at 0, so Android ignores your "default Home" choice. On our TCL, `set-home-activity` printed Success and changed nothing. The only reversible fix is switching the stock launcher off, so `swap` checks the result and undoes itself if the Home button doesn't land on tvkit Home.
 
 ## How it keeps your TV safe
+
+![How a change reaches the TV: you ask, Claude Code follows a skill, the guard hook checks every command and blocks raw writes like pm uninstall and fastboot, and tvkit plans, waits for your yes, runs live checks, snapshots, disables and journals, so tvkit undo can put back exactly what was there](docs/images/safety-flow.png)
 
 1. **Plan before change.** Every command that changes something prints a plan and does nothing until it's re-run with `--yes`. The skills only do that after you say yes.
 2. **Snapshot before every change**: all package states, all settings and the system properties.
